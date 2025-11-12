@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="AdvancedDNV.Tests/AdvancedDNV.Tests.csproj" />
+  <Project Path="AdvancedDNV/AdvancedDNV.csproj" />
+</Solution>
