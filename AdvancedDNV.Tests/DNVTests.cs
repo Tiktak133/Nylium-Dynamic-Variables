@@ -1,16 +1,23 @@
+using AdvancedDNV;
+using Microsoft.VisualBasic;
+using Microsoft.VisualStudio.TestPlatform.Utilities;
+using Newtonsoft.Json.Linq;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Xunit;
-using AdvancedDNV;
+using Xunit.Abstractions;
 
 namespace AdvancedDNV.Tests
 {
     public class DNVTests : IDisposable
     {
+        private readonly ITestOutputHelper _output;
         private readonly string testFilePath;
 
-        public DNVTests()
+        public DNVTests(ITestOutputHelper output)
         {
+            _output = output;
             // create unique test file path in C:\DNV\
             Directory.CreateDirectory("C:\\DNV");
             testFilePath = Path.Combine("C:\\DNV", $"test_{Guid.NewGuid():N}.dnv");
@@ -187,6 +194,44 @@ namespace AdvancedDNV.Tests
             Assert.NotNull(values);
 
             dnv.Close();
+        }
+
+        [Fact]
+        public void Open_Complex_File_ReadsStructure() 
+        { 
+            var dnv = new DNV(testFilePath);
+            dnv.Open();
+
+            var rnd = new Random();
+            int[] values = new int[1000];
+
+            for (int i = 0; i < values.Length; i++)
+                values[i] = rnd.Next(0, 1000);
+
+            for (int j = 0; j < 200; j++)
+            {
+                for (int i = 0; i < 200; i++)
+                    dnv.main[j.ToString()].Value(i.ToString()).Set(values);
+            }
+
+
+            dnv.SaveAndClose();
+
+            // Reopen and verify
+            var dnv2 = new DNV(testFilePath);
+            dnv2.Open();
+            for (int j = 0; j < 200; j++)
+            {
+                for (int i = 0; i < 200; i++)
+                {
+                    int[] val = dnv2.main[j.ToString()].Value(i.ToString()).Get<int[]>();
+                    Assert.Equal(values, val);
+                }
+            }
+
+            _output.WriteLine($"initialDataSize: {dnv2.Meta.initialDataSize/1024} kB\ncompressedDataSize: {dnv2.Meta.compressedDataSize/1024} kB");
+
+            dnv2.Close();
         }
     }
 }
