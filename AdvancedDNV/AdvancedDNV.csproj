@@ -4,8 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyVersion>2025.1117.1133.0</AssemblyVersion>
-    <FileVersion>2025.1117.1133.0</FileVersion>
+    <AssemblyVersion>2025.1117.1509.1</AssemblyVersion>
+    <FileVersion>2025.1117.1509.1</FileVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">

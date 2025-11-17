@@ -4,6 +4,7 @@ using Microsoft.VisualStudio.TestPlatform.Utilities;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using Xunit;
 using Xunit.Abstractions;
@@ -197,41 +198,174 @@ namespace AdvancedDNV.Tests
         }
 
         [Fact]
-        public void Open_Complex_File_ReadsStructure() 
-        { 
-            var dnv = new DNV(testFilePath);
-            dnv.Open();
+        public void Open_Complex_File_ReadsStructure()
+        {
+            var swTotal = Stopwatch.StartNew();
+            var sw = new Stopwatch();
 
+            // ctor
+            sw.Restart();
+            var dnv = new DNV(testFilePath);
+            sw.Stop();
+            _output.WriteLine($"Ctor: {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            // open
+            sw.Restart();
+            dnv.Open();
+            sw.Stop();
+            _output.WriteLine($"Open (initial): {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            // prepare data
+            sw.Restart();
             var rnd = new Random();
             int[] values = new int[1000];
-
             for (int i = 0; i < values.Length; i++)
                 values[i] = rnd.Next(0, 1000);
+            sw.Stop();
+            _output.WriteLine($"Generate sample array (1000 ints): {sw.Elapsed.TotalMilliseconds:F1} ms");
 
-            for (int j = 0; j < 200; j++)
+            // write many values
+            const int outer = 200;
+            const int inner = 200;
+            int totalSets = outer * inner;
+            sw.Restart();
+            for (int j = 0; j < outer; j++)
             {
-                for (int i = 0; i < 200; i++)
-                    dnv.main[j.ToString()].Value(i.ToString()).Set(values);
+                string sj = j.ToString();
+                for (int i = 0; i < inner; i++)
+                    dnv.main[sj][sj][sj].Value(i.ToString()).Set(values);
             }
+            sw.Stop();
+            _output.WriteLine($"Set {totalSets} values: {sw.Elapsed.TotalMilliseconds:F1} ms ({totalSets / Math.Max(1, sw.Elapsed.TotalSeconds):F0} ops/s)");
 
-
+            // save & close
+            sw.Restart();
             dnv.SaveAndClose();
+            sw.Stop();
+            _output.WriteLine($"SaveAndClose: {sw.Elapsed.TotalMilliseconds:F1} ms");
 
-            // Reopen and verify
+            // reopen (ctor + open)
+            sw.Restart();
             var dnv2 = new DNV(testFilePath);
+            sw.Stop();
+            _output.WriteLine($"Ctor (reopen): {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            sw.Restart();
             dnv2.Open();
-            for (int j = 0; j < 200; j++)
+            sw.Stop();
+            _output.WriteLine($"Open (reopen): {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            // verify random reads
+            int sampleCount = 1000;
+            var rndVerify = new Random();
+            var seen = new HashSet<int>();
+
+            sw.Restart();
+            while (seen.Count < Math.Min(sampleCount, totalSets))
             {
-                for (int i = 0; i < 200; i++)
-                {
-                    int[] val = dnv2.main[j.ToString()].Value(i.ToString()).Get<int[]>();
-                    Assert.Equal(values, val);
-                }
+                int idx = rndVerify.Next(0, totalSets); // indeks liniowy 0..totalSets-1
+                if (!seen.Add(idx)) continue;
+
+                int j = idx / inner;
+                int i = idx % inner;
+
+                int[] val = dnv2.main[j.ToString()][j.ToString()][j.ToString()].Value(i.ToString()).Get<int[]>();
+                Assert.Equal(values, val);
             }
+            sw.Stop();
+            _output.WriteLine($"Get & Assert {seen.Count} unique random values: {sw.Elapsed.TotalMilliseconds:F1} ms");
 
-            _output.WriteLine($"initialDataSize: {dnv2.Meta.initialDataSize/1024} kB\ncompressedDataSize: {dnv2.Meta.compressedDataSize/1024} kB");
+            // metadata sizes
+            _output.WriteLine($"initialDataSize: {dnv2.Meta.initialDataSize / 1024} kB");
+            _output.WriteLine($"compressedDataSize: {dnv2.Meta.compressedDataSize / 1024} kB");
 
-            dnv2.Close();
+
+            dnv2.main.Value("testMeta").Set("testing metadata");
+
+            // save & close
+            sw.Restart();
+            dnv2.SaveAndClose();
+            sw.Stop();
+            _output.WriteLine($"Second SaveAndClose: {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            swTotal.Stop();
+            _output.WriteLine($"Total test time: {swTotal.Elapsed.TotalMilliseconds:F1} ms ({swTotal.Elapsed.TotalSeconds:F3} s)");
+
+        }
+
+        [Fact]
+        public void OpenOldCSharp48FileFormat_ConsiderableDataBlock()
+        {
+            TestOpeningFile(@"C:\Users\kamil\source\repos\Nylium Dynamic Variables\AdvancedDNV\discordVideo.dnv");
+        }
+
+        [Fact]
+        public void OpenOldCSharp48FileFormat_SmallDataBlock()
+        {
+            TestOpeningFile(@"C:\Users\kamil\source\repos\Nylium Dynamic Variables\AdvancedDNV\update.dnv");
+        }
+
+        private void TestOpeningFile(string fileName)
+        {
+            var tempFile = @"temp_dataBlock.dnv";
+            if (File.Exists(tempFile))
+                File.Delete(tempFile);
+
+            File.Copy(fileName, tempFile);
+
+            var swTotal = Stopwatch.StartNew();
+            var sw = new Stopwatch();
+
+            // reopen (ctor + open)
+            sw.Restart();
+            var dnv2 = new DNV(fileName);
+            sw.Stop();
+            _output.WriteLine($"Ctor (reopen): {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            sw.Restart();
+            dnv2.Open();
+            sw.Stop();
+            _output.WriteLine($"Open (reopen): {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            // verify random reads
+            int sampleCount = 1000;
+            var rndVerify = new Random();
+            var seen = new HashSet<int>();
+
+            /*
+            sw.Restart();
+            while (seen.Count < Math.Min(sampleCount, totalSets))
+            {
+                int idx = rndVerify.Next(0, totalSets); // indeks liniowy 0..totalSets-1
+                if (!seen.Add(idx)) continue;
+
+                int j = idx / inner;
+                int i = idx % inner;
+
+                int[] val = dnv2.main[j.ToString()][j.ToString()][j.ToString()].Value(i.ToString()).Get<int[]>();
+                Assert.Equal(values, val);
+            }
+            sw.Stop();
+            _output.WriteLine($"Get & Assert {seen.Count} unique random values: {sw.Elapsed.TotalMilliseconds:F1} ms");
+            */
+
+            // metadata sizes
+            _output.WriteLine($"initialDataSize: {dnv2.Meta.initialDataSize / 1024} kB");
+            _output.WriteLine($"compressedDataSize: {dnv2.Meta.compressedDataSize / 1024} kB");
+
+
+            dnv2.main.Value("testMeta").Set("testing metadata");
+
+            // save & close
+            sw.Restart();
+            dnv2.SaveAndClose();
+            sw.Stop();
+            _output.WriteLine($"Second SaveAndClose: {sw.Elapsed.TotalMilliseconds:F1} ms");
+
+            swTotal.Stop();
+            _output.WriteLine($"Total test time: {swTotal.Elapsed.TotalMilliseconds:F1} ms ({swTotal.Elapsed.TotalSeconds:F3} s)");
+
+            File.Delete(tempFile);
         }
     }
 }
