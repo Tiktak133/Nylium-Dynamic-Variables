@@ -11,24 +11,30 @@ namespace AdvancedDNV
     public class Container
     {
         public string ContainerName { get; private set; }
-        internal List<Container> GlobalContainerList = new List<Container>();
-        internal List<Value> GlobalValuesList = new List<Value>();
+        internal HashSet<Container> GlobalContainerSet = new();
+        internal HashSet<Value> GlobalValuesSet = new();
         internal Dictionary<string, Container> ContainerList;
         internal Dictionary<string, Value> ValuesList = new Dictionary<string, Value>();
-        private Container _parent;
+        private Container? _parent;
 
         // Zaktualizowno jakąś wartość - potrzebne do auto zapisu
         public delegate void ValueUpdatedEventHandler();
         public event ValueUpdatedEventHandler ValueUpdated;
 
         DNVProperties _myProperties = new DNVProperties();
+        private readonly char[] _forbiddenCharsArray;
 
         /// <summary>
         /// Creates a container based on the supplied Byte data
         /// </summary>
         /// <param name="bytes">Data to create the container tree</param>
-        internal Container(byte[] bytes, Container par, advInt32 lastIndex, int endIndex)
+        internal Container(byte[] bytes, Container par, advInt32 lastIndex, int endIndex, char[]? forbiddenCharsCache = null)
         {
+            if (forbiddenCharsCache != null)
+                _forbiddenCharsArray = forbiddenCharsCache;
+            else
+                _forbiddenCharsArray = _myProperties.forbiddenChars.ToArray();
+
             ushort containerCount = BitConverter.ToUInt16(bytes, lastIndex.Get()); lastIndex.Add(2);
             ushort ContainerNameCount = containerCount;
 
@@ -58,15 +64,22 @@ namespace AdvancedDNV
                     byte[] newValueData = new byte[OccupiedSpaceValue];
                     Buffer.BlockCopy(bytes, endIndex + (int)StartIndexValue + 1, newValueData, 0, (int)OccupiedSpaceValue); // UWAGA +1 i -1 są ze względu na pierwszy byte zapisany w każdej zmiennej NA TEN MOMENT NIE UŻYWANY
 
-                    newValue.type = _myProperties.TypeByByte.TryGetValue(TypeValue, out var t) ? t : null;
-                    newValue.value = newValueData;
+                    if (_myProperties.TypeByByte.TryGetValue(TypeValue, out Type? t) && t != null)
+                    {
+                        newValue.type = t;
+                        newValue.value = newValueData;
 
-                    this.InsertValue(newValue);
+                        this.InsertValue(newValue);
+                    }
+                    else
+                    {
+                        throw new Exception("Unknown Value type found in DNV data");
+                    }
                 }
                 else if (typeCount > 0)
                 {
                     //nextContainer
-                    this.InsertContainer(new Container(bytes, this, lastIndex, endIndex));
+                    this.InsertContainer(new Container(bytes, this, lastIndex, endIndex, _forbiddenCharsArray));
                 }
                 else
                 {
@@ -75,21 +88,10 @@ namespace AdvancedDNV
             }
         }
 
-        bool StepContainer(byte[] bytes, advInt32 lastIndex)
-        {
-            if (bytes[lastIndex.Get()] == 0 && bytes[lastIndex.Get() + 1] == 0)
-            {
-                lastIndex.Add(2);
-                return false;
-            }
-            else
-            {
-                return true;
-            }
-        }
-
         protected internal Container(string name, Container par)
         {
+            _forbiddenCharsArray = _myProperties.forbiddenChars.ToArray();
+
             // Zakoduj tylko wtedy, gdy nie wszystkie znaki są ASCII
             var nameb = Encoding.UTF8.GetByteCount(name);
             if (nameb >= 32768)
@@ -107,7 +109,7 @@ namespace AdvancedDNV
                 if (!this.ContainerList.ContainsKey(key))
                 {
                     // Sprawdzanie, czy ciąg znaków zawiera jakiekolwiek z zakazanych znaków
-                    foreach (char c in _myProperties.forbiddenChars)
+                    foreach (char c in _forbiddenCharsArray)
                     {
                         if (key.Contains(c))
                         {
@@ -121,6 +123,19 @@ namespace AdvancedDNV
             }
         }
 
+        bool StepContainer(byte[] bytes, advInt32 lastIndex)
+        {
+            if (bytes[lastIndex.Get()] == 0 && bytes[lastIndex.Get() + 1] == 0)
+            {
+                lastIndex.Add(2);
+                return false;
+            }
+            else
+            {
+                return true;
+            }
+        }
+
         internal void ErrorLog(string text)
         {
             return;
@@ -128,36 +143,24 @@ namespace AdvancedDNV
 
         internal void InsertContainer(Container con)
         {
-            if (CheckNesting(con))
-            {
-                this.ContainerList.Add(con.ContainerName, con);
+            if (con == null)
+                throw new ArgumentNullException(nameof(con));
 
-                //Folder nie zostanie zagnierzdzony
-
-                con.GlobalContainerList = this.GlobalContainerList;
-                GlobalContainerList.Add(con);
-            }
-            else throw new Exception("You cannot add the same object to this object");
-        }
-
-        private bool CheckNesting(Container con)
-        {
-            if (this.GlobalContainerList.Contains(con))
+            // 1. Sprawdzenie zagnieżdżenia (O(1))
+            if (!GlobalContainerSet.Add(con))
                 throw new Exception("You cannot add the same object to this object");
-            else
+
+            // 2. Sprawdzenie unikalności nazwy (O(1))
+            if (!ContainerList.TryAdd(con.ContainerName, con))
             {
-                for (int i = 0; i < ContainerList.Count; i++)
-                {
-                    if (ContainerList.ElementAt(i).Value.ContainerName == con.ContainerName)
-                    {
-                        throw new Exception("You cannot have a Container with the same name");
-                    }
-                }
+                GlobalContainerSet.Remove(con); // rollback
+                throw new Exception("You cannot have a Container with the same name");
             }
 
-            //Wszystko ok, container jeszcze nie istnieje
-            return true;
+            // 3. Podpięcie do wspólnej listy
+            con.GlobalContainerSet = this.GlobalContainerSet;
         }
+
 
         /// <summary>
         /// An object holding values ​​for the DNV library
@@ -165,41 +168,35 @@ namespace AdvancedDNV
         /// <param name="key">Name of Value object</param>
         public Value Value(string key)
         {
-            if (!ValuesList.ContainsKey(key))
-            {
-                // Sprawdzanie, czy ciąg znaków zawiera jakiekolwiek z zakazanych znaków
-                foreach (char c in _myProperties.forbiddenChars)
-                {
-                    if (key.Contains(c))
-                    {
-                        throw new Exception("A prohibited char was used: " + c);
-                    }
-                }
+            if (key == null) throw new ArgumentNullException(nameof(key));
 
-                this.InsertValue(new Value(key, this));
-            }
-            return ValuesList[key];
+            if (ValuesList.TryGetValue(key, out var existing))
+                return existing;
+
+            // Szybkie sprawdzenie zakazanych znaków bez alokacji
+            if (_forbiddenCharsArray.Length > 0 && key.IndexOfAny(_forbiddenCharsArray) >= 0)
+                throw new ArgumentException("A prohibited char was used");
+
+            var newVal = new Value(key, this);
+            InsertValue(newVal);
+            return newVal;
         }
 
         internal void InsertValue(Value val)
         {
-            if (GlobalValuesList.Contains(val))
+            if (val == null)
+                throw new ArgumentNullException(nameof(val));
+
+            // 1. globalna unikalność obiektu
+            if (!GlobalValuesSet.Add(val))
                 throw new Exception("You cannot add the same object to this object");
-            else
+
+            // 2. unikalność nazwy lokalnie (O(1))
+            if (!ValuesList.TryAdd(val.ValueName, val))
             {
-                for (int i = 0; i < ValuesList.Count; i++)
-                {
-                    if (ValuesList.ElementAt(i).Value.ValueName == val.ValueName)
-                    {
-                        throw new Exception("You cannot have a Container with the same name");
-                    }
-                }
+                GlobalValuesSet.Remove(val); // rollback
+                throw new Exception("You cannot have a Value with the same name");
             }
-
-            // Wszystko ok, wartość jeszcze nie istnieje
-
-            ValuesList.Add(val.ValueName, val);
-            GlobalValuesList.Add(val);
         }
 
         /// <summary>
@@ -272,29 +269,28 @@ namespace AdvancedDNV
 
         public void DropContainer()
         {
-            if(_parent != null)
+            // 1. Usuń wartości
+            foreach (var value in GetValues())
+                value.Drop();
+
+            // 2. Usuń dzieci (rekurencyjnie)
+            foreach (var child in GetContainers())
+                child.DropContainer();
+
+            // 3. Odepnij od parenta
+            if (_parent != null)
             {
-                Value[] valuesToDrop = GetValues();
-                foreach (Value value in valuesToDrop)
-                {
-                    value.Drop();
-                }
-
-                Container[] containersToDrop = GetContainers();
-                foreach (Container container in containersToDrop)
-                {
-                    container.DropContainer();
-                }
-
-                var keyToRemove = _parent.ContainerList.FirstOrDefault(x => x.Value == this).Key;
-                if (keyToRemove != null)
-                {
-                    _parent.ContainerList.Remove(keyToRemove);
-                }
+                _parent.ContainerList.Remove(ContainerName);
                 _parent.OnValueUpdated();
-                _parent.GlobalContainerList.Remove(this);
             }
+
+            // 4. Usuń siebie z globalnego setu (NA KOŃCU, zawsze)
+            GlobalContainerSet.Remove(this);
+
+            // 5. Zerwij referencje (pomaga GC)
+            _parent = null;
         }
+
 
         /// <summary>
         /// Kompiluje kontener aby wykonać eksport danych
@@ -336,6 +332,7 @@ namespace AdvancedDNV
                 indexes.AddRange(BitConverter.GetBytes(nameLength)); // Dodawanie długości nazwy kontenera
                 indexes.AddRange(stringBytes); // Dodawanie nazwy w UTF8 kontenera
 
+                
                 foreach (var value in insideValues)
                 {
                     value.GetBytes(indexes, data);

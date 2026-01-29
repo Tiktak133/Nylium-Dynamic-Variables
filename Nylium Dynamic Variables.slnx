@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="AdvancedDNV.Tests/AdvancedDNV.Tests.csproj" />
   <Project Path="AdvancedDNV/AdvancedDNV.csproj" />
+  <Project Path="ConsoleDNVReader/ConsoleDNVReader.csproj" Id="f060e2b2-8d56-4648-aafe-8ff9b56b9c30" />
 </Solution>

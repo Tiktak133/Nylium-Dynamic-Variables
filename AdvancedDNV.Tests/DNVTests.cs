@@ -214,7 +214,7 @@ namespace AdvancedDNV.Tests
             dnv.Open();
             sw.Stop();
             _output.WriteLine($"Open (initial): {sw.Elapsed.TotalMilliseconds:F1} ms");
-
+            
             // prepare data
             sw.Restart();
             var rnd = new Random();
@@ -223,7 +223,7 @@ namespace AdvancedDNV.Tests
                 values[i] = rnd.Next(0, 1000);
             sw.Stop();
             _output.WriteLine($"Generate sample array (1000 ints): {sw.Elapsed.TotalMilliseconds:F1} ms");
-
+            
             // write many values
             const int outer = 200;
             const int inner = 200;
@@ -236,14 +236,15 @@ namespace AdvancedDNV.Tests
                     dnv.main[sj][sj][sj].Value(i.ToString()).Set(values);
             }
             sw.Stop();
+            
             _output.WriteLine($"Set {totalSets} values: {sw.Elapsed.TotalMilliseconds:F1} ms ({totalSets / Math.Max(1, sw.Elapsed.TotalSeconds):F0} ops/s)");
-
+            
             // save & close
             sw.Restart();
             dnv.SaveAndClose();
             sw.Stop();
             _output.WriteLine($"SaveAndClose: {sw.Elapsed.TotalMilliseconds:F1} ms");
-
+            
             // reopen (ctor + open)
             sw.Restart();
             var dnv2 = new DNV(testFilePath);
@@ -281,7 +282,7 @@ namespace AdvancedDNV.Tests
 
 
             dnv2.main.Value("testMeta").Set("testing metadata");
-
+            
             // save & close
             sw.Restart();
             dnv2.SaveAndClose();
@@ -290,7 +291,7 @@ namespace AdvancedDNV.Tests
 
             swTotal.Stop();
             _output.WriteLine($"Total test time: {swTotal.Elapsed.TotalMilliseconds:F1} ms ({swTotal.Elapsed.TotalSeconds:F3} s)");
-
+            
         }
 
         [Fact]

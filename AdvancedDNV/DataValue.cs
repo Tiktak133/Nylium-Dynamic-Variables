@@ -22,7 +22,7 @@ namespace AdvancedDNV
         internal Type type = null; //Typ wartości
         internal byte[] value;
 
-        DNVProperties _myProperties = new DNVProperties();
+        DNVProperties _myProperties = new();
         private object _engagedElementLock; // Blokuje dostęp do Value, gdy jest on używany przez inny wątek
 
         internal Value(string name, Container par)
@@ -560,20 +560,26 @@ namespace AdvancedDNV
 
         public void Drop()
         {
+            Container parent;
+
             lock (_engagedElementLock)
             {
-                this.value = null;
-                this.type = null;
+                // zabezpieczenie przed podwójnym Drop()
+                if (_parent == null)
+                    return;
 
-                var keyToRemove = _parent.ValuesList.FirstOrDefault(x => x.Value == this).Key;
-                if (keyToRemove != null)
-                {
-                    _parent.ValuesList.Remove(keyToRemove);
-                }
-                _parent.GlobalValuesList.Remove(this);
-                _parent.OnValueUpdated();
-                this._parent = null;
+                parent = _parent;
+
+                value = null;
+                type = null;
+
+                _parent = null; // zerwij wcześnie
             }
+
+            // USUWANIE POZA LOCKIEM (ważne)
+            parent.ValuesList.Remove(ValueName);
+            parent.GlobalValuesSet.Remove(this);
+            parent.OnValueUpdated();
         }
 
         protected internal void GetBytes(List<byte> indexes, List<byte> data)

@@ -11,15 +11,15 @@ namespace AdvancedDNV
     {
         private DNVProperties _defaultProperties;
 
-        private Container _conMain;
-        private Container _metadata;
+        private Container? _conMain;
+        private Container? _metadata;
         private string Pass = string.Empty;
-        string _FilePath = string.Empty;
+        private string _FilePath = string.Empty;
 
-        internal System.Timers.Timer autoSaveTimer;  // Auto save
+        internal System.Timers.Timer? autoSaveTimer;  // Auto save
 
-        public iProperties Properties;
-        public iMeta Meta;
+        public iProperties? Properties;
+        public iMeta? Meta;
 
         public bool isOpened { get; internal set; }
         private readonly object _savingLock = new object();
@@ -132,7 +132,7 @@ namespace AdvancedDNV
 
                                     // Tworzymy nowe bufory o rozmiarze odpowiednim do ilości danych
                                     byte[] metadataData = reader.ReadBytes(metaDataCount);
-                                    byte[] mainData = null;
+                                    byte[]? mainData = null;
 
                                     // If metadata is empty (only 4-byte header), create empty metadata container
                                     if (metadataData == null || metadataData.Length <= 4)
@@ -203,7 +203,9 @@ namespace AdvancedDNV
                                             }
                                             else
                                             {
+                                                Console.WriteLine("Loading DNV Main container...");
                                                 _conMain = new Container(mainData, null, new advInt32().Set(4), mainEndIndex);
+                                                Console.WriteLine("DNV Main container loaded.");
                                             }
                                         }
                                         _conMain.ValueUpdated += ConMain_ValueUpdated;
@@ -266,15 +268,15 @@ namespace AdvancedDNV
             lock (_savingLock)
             {
                 autoSaveTimer?.Stop();
-                if (_conMain == null || !isOpened)
+                if (_conMain == null || _metadata == null || !isOpened)
                     return;
 
                 // Zapisywanie metadanych
                 _metadata.Value("saveCounter").Add(1);
                 _metadata["compression"].Value("enable").Set(false);
 
-                byte[] salt = null;
-                byte[] Key = null, IV = null;
+                byte[]? salt = null;
+                byte[]? Key = null, IV = null;
 
                 if (Pass != string.Empty)
                 {
@@ -388,6 +390,13 @@ namespace AdvancedDNV
             {
                 if (isOpened)
                 {
+                    if (autoSaveTimer != null)
+                    {
+                        autoSaveTimer.Stop();
+                        autoSaveTimer.Dispose();
+                        autoSaveTimer = null;
+                    }
+
                     _conMain = null;
                     _metadata = null;
 
@@ -419,12 +428,15 @@ namespace AdvancedDNV
             private DNV DNVParent;
             internal iMeta(DNV DNVParent) { this.DNVParent = DNVParent; }
 
-            private T GetMetadataValue<T>(string key, string subkey = null, T defaultValue = default)
+            private T GetMetadataValue<T>(string key, string? subkey = null, T? defaultValue = default)
             {
                 if (DNVParent.isOpened && DNVParent._metadata != null)
                 {
                     var section = string.IsNullOrEmpty(subkey) ? DNVParent._metadata : DNVParent._metadata[key];
-                    return section.Value(subkey ?? key).Get(defaultValue);
+                    if (defaultValue == null)
+                        return section.Value(subkey ?? key).Get<T>();
+                    else
+                        return section.Value(subkey ?? key).Get(defaultValue);
                 }
                 else
                 {
