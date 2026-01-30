@@ -98,9 +98,11 @@ Represents a single stored variable.
 - change-tracked
 
 ```csharp
+// Setting data to value (two ways)
 user.SetValue("Name", "Tiktak133");
 user.Value("Age").Set(25);
 
+// Extracting data
 var age = user.Value("Age").Get();
 ```
 
