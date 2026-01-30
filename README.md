@@ -201,7 +201,3 @@ var volume = frame.Main["Settings"].Value("Volume").Get();
 - secure local persistence
 
 ---
-
-## 📄 License
-
-Internal / private usage
