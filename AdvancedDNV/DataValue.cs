@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Text;
 
 namespace AdvancedDNV
 {
@@ -16,11 +11,11 @@ namespace AdvancedDNV
         /// <summary>
         /// Object type, value type ​​of this Value
         /// </summary>
-        public Type Type { get { return type; } }
+        public Type? Type { get { return type; } }
         private Container _parent;
 
-        internal Type type = null; //Typ wartości
-        internal byte[] value;
+        internal Type? type = null; //Typ wartości
+        internal byte[]? value;
 
         DNVProperties _myProperties = new();
         private object _engagedElementLock; // Blokuje dostęp do Value, gdy jest on używany przez inny wątek
@@ -415,8 +410,11 @@ namespace AdvancedDNV
             return this;
         }
 
-        private dynamic transformToType(Type in_type)
+        private dynamic? transformToType(Type? in_type)
         {
+            if (value == null || in_type == null || value.Length == 0)
+                return null;
+
             if (in_type == typeof(bool))
                 return BitConverter.ToBoolean(value, 0);
             else if (in_type == typeof(string))
@@ -526,17 +524,13 @@ namespace AdvancedDNV
         /// </summary>
         /// <param name="defaultOut">Default value, used if no other one is saved</param>
         /// <returns>The value of the Value object</returns>
-        public dynamic Get(dynamic defaultOut)
+        public dynamic? Get(dynamic defaultOut)
         {
             lock (_engagedElementLock)
             {
                 if (value != null && value.Length > 0)
                 {
-                    dynamic getValue = transformToType(type);
-                    if (getValue != null)
-                    {
-                        return getValue;
-                    }
+                    return transformToType(type);
                 }
                 return defaultOut;
             }
@@ -546,7 +540,7 @@ namespace AdvancedDNV
         /// Returns the value obtained automatically
         /// </summary>
         /// <returns>>The value of the Value object</returns>
-        public dynamic Get()
+        public dynamic? Get()
         {
             lock (_engagedElementLock)
             {

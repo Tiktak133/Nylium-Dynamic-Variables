@@ -1,8 +1,4 @@
-﻿using System;
-using System.Diagnostics;
-using System.IO;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System.Text;
 using System.Timers;
 
 namespace AdvancedDNV
@@ -203,9 +199,7 @@ namespace AdvancedDNV
                                             }
                                             else
                                             {
-                                                Console.WriteLine("Loading DNV Main container...");
                                                 _conMain = new Container(mainData, null, new advInt32().Set(4), mainEndIndex);
-                                                Console.WriteLine("DNV Main container loaded.");
                                             }
                                         }
                                         _conMain.ValueUpdated += ConMain_ValueUpdated;
