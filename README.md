@@ -22,6 +22,23 @@ It can be compared to **JSON**, but:
 - files are **unreadable without the library**
 - optimized for backend & services
 
+### ⚠️ Memory Model
+
+All loaded data is **kept entirely in RAM** for the lifetime of the `DNV` / `DNVFrame` instance.  
+As a result:
+
+- data access is very fast
+- no partial loading or streaming is used
+- memory usage grows with data size
+
+**Recommended usage:**  
+- small to medium datasets  
+- configuration data  
+- runtime state  
+- backend/service metadata  
+
+Not recommended for very large datasets.
+
 ---
 
 ## 🧱 Architecture
@@ -84,6 +101,7 @@ Containers behave like folders.
 
 ```csharp
 var user = main["User"];
+var subf = main["User"]["subfolder"];
 ```
 
 ---
@@ -100,10 +118,10 @@ Represents a single stored variable.
 ```csharp
 // Setting data to value (two ways)
 user.SetValue("Name", "Tiktak133");
-user.Value("Age").Set(25);
+user.Value("Name").Set("Tiktak133");
 
 // Extracting data
-var age = user.Value("Age").Get();
+var age = user.Value("Name").Get();
 ```
 
 ---
@@ -165,9 +183,9 @@ var dnv = new DNV("data.dnv", "secret-password", AutoSave: true);
 var main = dnv.main;
 
 var settings = main["Settings"];
-settings.Value("Volume").Set(80);
-settings.Value("Volume").Add(8);
-settings.Value("Fullscreen").Set(true);
+settings.Value("Volume").Set(80);        // [main/Settings < Volume = 80]
+settings.Value("Volume").Add(-8);        // [main/Settings < Volume = 72]
+settings.Value("Fullscreen").Set(true);  // [main/Settings < Fullscreen = true]
 
 // Possibility to manually force saving when closing the program
 // dnv.SaveAndClose();
@@ -186,9 +204,9 @@ byte[] payload = frame.ToBytes();
 ### Import
 ```csharp
 DNVFrame frame = new DNVFrame(payload);
-int volume = frame.Main["Settings"].Value("Volume").Get<int>();
+int volume = frame.main["Settings"].Value("Volume").Get<int>();
 
-var volume = frame.Main["Settings"].Value("Volume").Get();
+var volume = frame.main["Settings"].Value("Volume").Get();
 ```
 
 ---
