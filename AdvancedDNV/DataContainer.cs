@@ -199,13 +199,13 @@ namespace AdvancedDNV
         /// <summary>
         /// Deprecated data placement, use newer Value.Set(value) function
         /// </summary>
-        public Container SetValue(string name, dynamic value)
+        public Container SetValue(string name, dynamic? value)
         {
             this.Value(name).Set(value);
             return this;
         }
 
-        public Container SetValues(params (string name, dynamic value)[] values)
+        public Container SetValues(params (string name, dynamic? value)[] values)
         {
             HashSet<string> uniqueNames = new HashSet<string>();
 

@@ -49,7 +49,7 @@ namespace AdvancedDNV
         /// Adding/Summing a value to an already stored value in an object, doesn't work with all types
         /// </summary>
         /// <param name="value"></param>
-        public Value Add(dynamic value)
+        public Value Add(dynamic? value)
         {
             if (value == null)
             {
@@ -196,10 +196,17 @@ namespace AdvancedDNV
         /// </summary>
         /// <param name="value"></param>
         /// <returns></returns>
-        public Value Set(dynamic value)
+        public Value Set(dynamic? value)
         {
             lock (_engagedElementLock) // Blokuje dostęp do Value, gdy jest on używany przez inny wątek
             {
+                if (value == null)
+                {
+                    value = null;
+                    type = null;
+                    return this;
+                }
+
                 if (_parent != null) // Jeżeli Value zostanie Droped do momentu wywołania tej metody
                 {
                     try
