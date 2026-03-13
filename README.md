@@ -100,8 +100,14 @@ Containers behave like folders.
 - changes trigger autosave
 
 ```csharp
-var user = main["User"];
-var subf = main["User"]["subfolder"];
+DNV dnv = new("data.dnv"); // To save on disk
+Container main = dnv.main;
+// OR
+DNVFrame frame = new(); // Can be use to export (it's just a DNV structure, not an instance of the file in autosave)
+Container main = dnv.main;
+
+Container user = main["User"];
+Container subf = main["User"]["subfolder"];
 ```
 
 ---
@@ -121,7 +127,7 @@ user.SetValue("Name", "Tiktak133");
 user.Value("Name").Set("Tiktak133");
 
 // Extracting data
-var age = user.Value("Name").Get();
+string? age = user.Value("Name").Get(); 
 ```
 
 ---
@@ -179,10 +185,10 @@ Without the library, files are **not readable**.
 ## 🔁 Example – Create & Save
 
 ```csharp
-var dnv = new DNV("data.dnv", "secret-password", AutoSave: true);
-var main = dnv.main;
+DNV dnv = new("data.dnv", "secret-password", AutoSave: true);
+Container main = dnv.main;
 
-var settings = main["Settings"];
+Container settings = main["Settings"];
 settings.Value("Volume").Set(80);        // [main/Settings < Volume = 80]
 settings.Value("Volume").Add(-8);        // [main/Settings < Volume = 72]
 settings.Value("Fullscreen").Set(true);  // [main/Settings < Fullscreen = true]
@@ -204,9 +210,10 @@ byte[] payload = frame.ToBytes();
 ### Import
 ```csharp
 DNVFrame frame = new DNVFrame(payload);
-int volume = frame.main["Settings"].Value("Volume").Get<int>();
 
-var volume = frame.main["Settings"].Value("Volume").Get();
+// Using imported data
+int? volume = frame.main["Settings"].Value("Volume").Get<int?>();
+dynamic volume = frame.main["Settings"].Value("Volume").Get();
 ```
 
 ---
