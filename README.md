@@ -104,7 +104,7 @@ DNV dnv = new("data.dnv"); // To save on disk
 Container main = dnv.main;
 // OR
 DNVFrame frame = new(); // Can be use to export (it's just a DNV structure, not an instance of the file in autosave)
-Container main = dnv.main;
+Container main = frame.main;
 
 Container user = main["User"];
 Container subf = main["User"]["subfolder"];
