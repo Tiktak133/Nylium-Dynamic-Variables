@@ -45,7 +45,7 @@ Not recommended for very large datasets.
 
 ```
 DNV
- ├── Main (Container)
+ ├── Main (Container) - default and first container in the structure
  │    ├── Container
  │    │    └── Value
  │    └── Value
@@ -100,11 +100,7 @@ Containers behave like folders.
 - changes trigger autosave
 
 ```csharp
-DNV dnv = new("data.dnv"); // To save on disk
-Container main = dnv.main;
-// OR
-DNVFrame frame = new(); // Can be use to export (it's just a DNV structure, not an instance of the file in autosave)
-Container main = frame.main;
+// main is defaut Container in `DNV` / `DNVFrame`
 
 Container user = main["User"];
 Container subf = main["User"]["subfolder"];
@@ -158,18 +154,17 @@ Lightweight data representation.
 Used for:
 - network transfer
 - export / import
-- working without file access
 
 ### Constructors
 ```csharp
 DNVFrame()
-DNVFrame(byte[] recoveryData)
-DNVFrame(string recoveryDataString)
+DNVFrame(byte[] exportedData)
+DNVFrame(string exportedDataString)
 ```
 
 ---
 
-## 🔐 Encryption
+## 🔐 Encryption (Only DNV File)
 
 - symmetric encryption
 - in-place byte encryption
@@ -211,7 +206,7 @@ byte[] payload = frame.ToBytes();
 ```csharp
 DNVFrame frame = new DNVFrame(payload);
 
-// Using imported data
+// Using imported data (two ways)
 int? volume = frame.main["Settings"].Value("Volume").Get<int?>();
 dynamic volume = frame.main["Settings"].Value("Volume").Get();
 ```
