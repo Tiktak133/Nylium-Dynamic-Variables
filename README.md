@@ -123,7 +123,7 @@ user.SetValue("Name", "Tiktak133");
 user.Value("Name").Set("Tiktak133");
 
 // Extracting data
-string? age = user.Value("Name").Get(); 
+string? nickName = user.Value("Name").Get(); 
 ```
 
 ---
