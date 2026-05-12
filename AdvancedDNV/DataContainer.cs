@@ -11,12 +11,12 @@ namespace AdvancedDNV
         internal HashSet<Container> GlobalContainerSet = new();
         internal HashSet<Value> GlobalValuesSet = new();
         internal Dictionary<string, Container> ContainerList;
-        internal Dictionary<string, Value> ValuesList = new Dictionary<string, Value>();
+        internal Dictionary<string, Value> ValuesList = new();
         private Container? _parent;
 
         // Zaktualizowno jakąś wartość - potrzebne do auto zapisu
         public delegate void ValueUpdatedEventHandler();
-        public event ValueUpdatedEventHandler ValueUpdated;
+        public event ValueUpdatedEventHandler? ValueUpdated;
 
         DNVProperties _myProperties = new DNVProperties();
         private readonly char[] _forbiddenCharsArray;
@@ -238,17 +238,17 @@ namespace AdvancedDNV
         /// <summary>
         /// Deprecated data retrieval, use newer Value.Get() function
         /// </summary>
-        public dynamic GetValue(Value objectV)
+        public dynamic? GetValue(Value objectV)
         {
             return objectV.Get();
         }
 
-        public dynamic GetValue(string name)
+        public dynamic? GetValue(string name)
         {
             return this.Value(name).Get();
         }
 
-        public dynamic GetValue(string name, dynamic defaultOut)
+        public dynamic? GetValue(string name, dynamic? defaultOut)
         {
             return this.Value(name).Get(defaultOut);
         }

@@ -531,7 +531,7 @@ namespace AdvancedDNV
         /// </summary>
         /// <param name="defaultOut">Default value, used if no other one is saved</param>
         /// <returns>The value of the Value object</returns>
-        public dynamic? Get(dynamic defaultOut)
+        public dynamic? Get(dynamic? defaultOut)
         {
             lock (_engagedElementLock)
             {
