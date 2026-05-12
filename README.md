@@ -45,7 +45,7 @@ Not recommended for very large datasets.
 
 ```
 DNV
- ├── Main (Container)
+ ├── Main (Container) - default and first container in the structure
  │    ├── Container
  │    │    └── Value
  │    └── Value
@@ -100,8 +100,10 @@ Containers behave like folders.
 - changes trigger autosave
 
 ```csharp
-var user = main["User"];
-var subf = main["User"]["subfolder"];
+// main is defaut Container in `DNV` / `DNVFrame`
+
+Container user = main["User"];
+Container subf = main["User"]["subfolder"];
 ```
 
 ---
@@ -121,7 +123,7 @@ user.SetValue("Name", "Tiktak133");
 user.Value("Name").Set("Tiktak133");
 
 // Extracting data
-var age = user.Value("Name").Get();
+string? nickName = user.Value("Name").Get(); 
 ```
 
 ---
@@ -152,18 +154,17 @@ Lightweight data representation.
 Used for:
 - network transfer
 - export / import
-- working without file access
 
 ### Constructors
 ```csharp
 DNVFrame()
-DNVFrame(byte[] recoveryData)
-DNVFrame(string recoveryDataString)
+DNVFrame(byte[] exportedData)
+DNVFrame(string exportedDataString)
 ```
 
 ---
 
-## 🔐 Encryption
+## 🔐 Encryption (Only DNV File)
 
 - symmetric encryption
 - in-place byte encryption
@@ -179,10 +180,10 @@ Without the library, files are **not readable**.
 ## 🔁 Example – Create & Save
 
 ```csharp
-var dnv = new DNV("data.dnv", "secret-password", AutoSave: true);
-var main = dnv.main;
+DNV dnv = new("data.dnv", "secret-password", AutoSave: true);
+Container main = dnv.main;
 
-var settings = main["Settings"];
+Container settings = main["Settings"];
 settings.Value("Volume").Set(80);        // [main/Settings < Volume = 80]
 settings.Value("Volume").Add(-8);        // [main/Settings < Volume = 72]
 settings.Value("Fullscreen").Set(true);  // [main/Settings < Fullscreen = true]
@@ -204,9 +205,10 @@ byte[] payload = frame.ToBytes();
 ### Import
 ```csharp
 DNVFrame frame = new DNVFrame(payload);
-int volume = frame.main["Settings"].Value("Volume").Get<int>();
 
-var volume = frame.main["Settings"].Value("Volume").Get();
+// Using imported data (two ways)
+int? volume = frame.main["Settings"].Value("Volume").Get<int?>();
+dynamic volume = frame.main["Settings"].Value("Volume").Get();
 ```
 
 ---
