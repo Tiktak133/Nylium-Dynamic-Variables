@@ -1,7 +1,8 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -110,8 +111,9 @@ namespace AdvancedDNV.Tests
             var guid = Guid.NewGuid();
             var date = new DateTime(2020, 1, 2, 3, 4, 5);
 
+            dnv.main.Value("ąćżźł").Set("polish");
             dnv.main.Value("intVal").Set(12345);
-            dnv.main.Value("strVal").Set("hello world");
+            dnv.main.Value("strVal").Set("hello world - polska górą  ąbćżźłr@");
             dnv.main.Value("boolVal").Set(true);
             dnv.main.Value("doubleVal").Set(3.1415926535);
             dnv.main.Value("dateVal").Set(date);
@@ -123,7 +125,8 @@ namespace AdvancedDNV.Tests
             dnv2.Open();
 
             Assert.Equal(12345, dnv2.main.Value("intVal").Get<int>());
-            Assert.Equal("hello world", dnv2.main.Value("strVal").Get<string>());
+            Assert.Equal("hello world - polska górą  ąbćżźłr@", dnv2.main.Value("strVal").Get<string>());
+            Assert.Equal("polish", dnv2.main.Value("ąćżźł").Get<string>());
             Assert.True(dnv2.main.Value("boolVal").Get<bool>());
             Assert.Equal(3.1415926535, dnv2.main.Value("doubleVal").Get<double>(), 7);
 
@@ -144,7 +147,7 @@ namespace AdvancedDNV.Tests
 
             byte[] byteArr = new byte[] { 1, 2, 3, 255 };
             int[] intArr = new int[] { 10, 20, 30 };
-            string[] strArr = new string[] { "alpha", "beta", "��d�" };
+            string[] strArr = new string[] { "alpha", "beta", "łódź" };
 
             dnv.main.Value("byteArr").Set(byteArr);
             dnv.main.Value("intArr").Set(intArr);
@@ -363,6 +366,152 @@ namespace AdvancedDNV.Tests
             _output.WriteLine($"Total test time: {swTotal.Elapsed.TotalMilliseconds:F1} ms ({swTotal.Elapsed.TotalSeconds:F3} s)");
 
             File.Delete(tempFile);
+        }
+
+        [Fact]
+        public void BenchmarkDNVFrame_vs_JSON()
+        {
+            const int iterations = 50;
+            const int fieldsPerIteration = 2000;
+
+            var sw = new Stopwatch();
+            var rng = new Random(42);
+
+            // ── Przygotowanie danych testowych ──────────────────────────────────
+            var testData = new Dictionary<string, object>(fieldsPerIteration);
+            for (int i = 0; i < fieldsPerIteration; i++)
+            {
+                testData[$"key_{i}"] = i % 3 == 0
+                    ? (object)rng.Next(int.MinValue, int.MaxValue)
+                    : i % 3 == 1
+                        ? (object)(rng.NextDouble() * 10_000)
+                        : (object)Guid.NewGuid();
+            }
+
+            // ════════════════════════════════════════════════════════════════════
+            // DNVFrame – zapis (SendToByte)
+            // ════════════════════════════════════════════════════════════════════
+            long dnvWriteMs = 0;
+            byte[] dnvBytes = Array.Empty<byte>();
+
+            sw.Restart();
+            for (int iter = 0; iter < iterations; iter++)
+            {
+                var frame = new DNVFrame();
+                foreach (var kv in testData)
+                {
+                    switch (kv.Value)
+                    {
+                        case int iv:    frame.main.Value(kv.Key).Set(iv);  break;
+                        case double dv: frame.main.Value(kv.Key).Set(dv);  break;
+                        case Guid gv:   frame.main.Value(kv.Key).Set(gv);  break;
+                    }
+                }
+                dnvBytes = frame.SendToByte();
+            }
+            sw.Stop();
+            dnvWriteMs = sw.ElapsedMilliseconds;
+
+            // ════════════════════════════════════════════════════════════════════
+            // JSON – zapis (JsonSerializer.SerializeToUtf8Bytes)
+            // ════════════════════════════════════════════════════════════════════
+            long jsonWriteMs = 0;
+            byte[] jsonBytes = Array.Empty<byte>();
+
+            sw.Restart();
+            for (int iter = 0; iter < iterations; iter++)
+                jsonBytes = JsonSerializer.SerializeToUtf8Bytes(testData);
+            sw.Stop();
+            jsonWriteMs = sw.ElapsedMilliseconds;
+
+            // ════════════════════════════════════════════════════════════════════
+            // DNVFrame – odczyt (inicjalizacja z byte[])
+            // ════════════════════════════════════════════════════════════════════
+            long dnvReadMs = 0;
+
+            sw.Restart();
+            for (int iter = 0; iter < iterations; iter++)
+            {
+                var frameCopy = (byte[])dnvBytes.Clone();
+                var frame2 = new DNVFrame(frameCopy);
+                // odczyt wszystkich kluczy liczbowych i tekstowych
+                for (int i = 0; i < fieldsPerIteration; i++)
+                {
+                    string key = $"key_{i}";
+                    if (i % 3 == 0)      _ = frame2.main.Value(key).Get<int>();
+                    else if (i % 3 == 1) _ = frame2.main.Value(key).Get<double>();
+                    else                 _ = frame2.main.Value(key).Get<Guid>();
+                }
+            }
+            sw.Stop();
+            dnvReadMs = sw.ElapsedMilliseconds;
+
+            // ════════════════════════════════════════════════════════════════════
+            // JSON – odczyt (JsonSerializer.Deserialize)
+            // ════════════════════════════════════════════════════════════════════
+            long jsonReadMs = 0;
+
+            sw.Restart();
+            for (int iter = 0; iter < iterations; iter++)
+                _ = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonBytes);
+            sw.Stop();
+            jsonReadMs = sw.ElapsedMilliseconds;
+
+            // ════════════════════════════════════════════════════════════════════
+            // Operacje na danych – modyfikacja wartości w pętli
+            // ════════════════════════════════════════════════════════════════════
+            long dnvOpsMs = 0;
+
+            var frameOps = new DNVFrame();
+            for (int i = 0; i < fieldsPerIteration; i++)
+                frameOps.main.Value($"key_{i}").Set(i);
+
+            sw.Restart();
+            for (int iter = 0; iter < iterations; iter++)
+                for (int i = 0; i < fieldsPerIteration; i++)
+                {
+                    int current = frameOps.main.Value($"key_{i}").Get<int>();
+                    frameOps.main.Value($"key_{i}").Set(current + 1);
+                }
+            sw.Stop();
+            dnvOpsMs = sw.ElapsedMilliseconds;
+
+            long jsonOpsMs = 0;
+            var jsonDict = new Dictionary<string, int>(fieldsPerIteration);
+            for (int i = 0; i < fieldsPerIteration; i++) jsonDict[$"key_{i}"] = i;
+
+            sw.Restart();
+            for (int iter = 0; iter < iterations; iter++)
+                for (int i = 0; i < fieldsPerIteration; i++)
+                    jsonDict[$"key_{i}"] = jsonDict[$"key_{i}"] + 1;
+            sw.Stop();
+            jsonOpsMs = sw.ElapsedMilliseconds;
+
+            // ════════════════════════════════════════════════════════════════════
+            // Wyniki
+            // ════════════════════════════════════════════════════════════════════
+            _output.WriteLine($"════════════════════════════════════════════");
+            _output.WriteLine($"  Benchmark: DNVFrame vs JSON  ({iterations} iteracji, {fieldsPerIteration} pól)");
+            _output.WriteLine($"════════════════════════════════════════════");
+            _output.WriteLine($"  Rozmiar serializacji:");
+            _output.WriteLine($"    DNVFrame : {dnvBytes.Length,8} B");
+            _output.WriteLine($"    JSON     : {jsonBytes.Length,8} B");
+            _output.WriteLine($"────────────────────────────────────────────");
+            _output.WriteLine($"  Zapis (SerializeToByte / SerializeToUtf8Bytes):");
+            _output.WriteLine($"    DNVFrame : {dnvWriteMs,6} ms   ({dnvWriteMs * 1.0 / iterations:F3} ms/iter)");
+            _output.WriteLine($"    JSON     : {jsonWriteMs,6} ms   ({jsonWriteMs * 1.0 / iterations:F3} ms/iter)");
+            _output.WriteLine($"    Stosunek : JSON jest {(dnvWriteMs > 0 ? (double)dnvWriteMs / jsonWriteMs : 0):F2}x wolniejszy/szybszy niż DNVFrame");
+            _output.WriteLine($"────────────────────────────────────────────");
+            _output.WriteLine($"  Odczyt (deserializacja + dostęp do pól):");
+            _output.WriteLine($"    DNVFrame : {dnvReadMs,6} ms   ({dnvReadMs * 1.0 / iterations:F3} ms/iter)");
+            _output.WriteLine($"    JSON     : {jsonReadMs,6} ms   ({jsonReadMs * 1.0 / iterations:F3} ms/iter)");
+            _output.WriteLine($"    Stosunek : JSON jest {(dnvReadMs > 0 ? (double)dnvReadMs / jsonReadMs : 0):F2}x wolniejszy/szybszy niż DNVFrame");
+            _output.WriteLine($"────────────────────────────────────────────");
+            _output.WriteLine($"  Operacje na danych (odczyt + modyfikacja wartości):");
+            _output.WriteLine($"    DNVFrame : {dnvOpsMs,6} ms   ({dnvOpsMs * 1.0 / iterations:F3} ms/iter)");
+            _output.WriteLine($"    JSON     : {jsonOpsMs,6} ms   ({jsonOpsMs * 1.0 / iterations:F3} ms/iter)");
+            _output.WriteLine($"    Stosunek : JSON jest {(dnvOpsMs > 0 ? (double)dnvOpsMs / jsonOpsMs : 0):F2}x wolniejszy/szybszy niż DNVFrame");
+            _output.WriteLine($"════════════════════════════════════════════");
         }
     }
 }
