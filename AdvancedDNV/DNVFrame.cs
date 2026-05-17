@@ -9,7 +9,7 @@ namespace AdvancedDNV
 {
     public class DNVFrame
     {
-        private DNVProperties _myProperties = new DNVProperties();
+        private DNVProperties _myProperties = DNVProperties.Instance;
 
         private Container _conMain;
         private Container _metadata;
@@ -22,14 +22,14 @@ namespace AdvancedDNV
 
         public DNVFrame(byte[] recoveryData)
         {
-            new DNVEncryption().SimpleEncryptInPlace(recoveryData, _myProperties.DNVFrameEncryption);
+            DNVEncryption.SimpleEncryptInPlace(recoveryData, _myProperties.DNVFrameEncryption);
             InitializeFrame(recoveryData);
         }
 
         public DNVFrame(string recoveryDataString)
         {
             byte[] recoveryData = Encoding.UTF8.GetBytes(recoveryDataString);
-            new DNVEncryption().SimpleEncryptInPlace(recoveryData, _myProperties.DNVFrameEncryption);
+            DNVEncryption.SimpleEncryptInPlace(recoveryData, _myProperties.DNVFrameEncryption);
             InitializeFrame(recoveryData);
         }
 
@@ -41,39 +41,48 @@ namespace AdvancedDNV
 
             // Tworzymy nową tablicę na wynik
             byte[] metadataData = new byte[metaDataCount];
-            byte[] mainData = new byte[initializeData.Count() - lastIndex - metaDataCount];
+            byte[] mainData = new byte[initializeData.Length - lastIndex - metaDataCount];
 
             // Kopiujemy część tablicy
             Buffer.BlockCopy(initializeData, lastIndex, metadataData, 0, metaDataCount);
-            Buffer.BlockCopy(initializeData, lastIndex + metaDataCount, mainData, 0, initializeData.Count() - lastIndex - metaDataCount);
+            Buffer.BlockCopy(initializeData, lastIndex + metaDataCount, mainData, 0, mainData.Length);
 
-            _metadata = new Container(metadataData, null, new advInt32().Set(4), BitConverter.ToInt32(metadataData, 0));
-            _conMain = new Container(mainData, null, new advInt32().Set(4), BitConverter.ToInt32(mainData, 0));
+            int metaStart = 4;
+            int mainStart = 4;
+            _metadata = new Container(metadataData, null, ref metaStart, BitConverter.ToInt32(metadataData, 0));
+            _conMain  = new Container(mainData,     null, ref mainStart, BitConverter.ToInt32(mainData, 0));
         }
 
         public byte[] SendToByte()
         {
             //SET METADATA
-            _metadata.Value("Frame").Set(true); // Musi być aby kontener metaData nie został usunięty z powodu braku wartości wewnątrz
+            _metadata.Value("Frame").Set(true);
 
             //COMPILE
-            List<Byte> bytes = new List<Byte>();
-            bytes.Add(_myProperties.MyVersion); //Wersja kodowania DNV - x2byte
-            bytes.Add(0x00);
-
-            var byteMain = _conMain.CompileContainer();
+            var byteMain     = _conMain.CompileContainer();
             var byteMetadata = _metadata.CompileContainer();
 
-            if (byteMain.Count() + byteMetadata.Count() + 4096 >= int.MaxValue)
+            long totalLen = 2L + 4 + byteMetadata.Length + byteMain.Length;
+            if (totalLen + 4096 >= int.MaxValue)
                 throw new Exception("DNV is too long");
 
-            bytes.AddRange(BitConverter.GetBytes(byteMetadata.Count())); //Wielkość kontenera metadanych - x4byte
+            byte[] exportData = new byte[totalLen];
+            int offset = 0;
 
-            bytes.AddRange(byteMetadata); //Dodawanie metadanych
-            bytes.AddRange(byteMain); //Dodawanie main
+            exportData[offset++] = _myProperties.MyVersion;
+            exportData[offset++] = 0x00;
 
-            var exportData = bytes.ToArray();
-            new DNVEncryption().SimpleEncryptInPlace(exportData, _myProperties.DNVFrameEncryption);
+            // Inline zapis 4 bajtów — eliminuje BitConverter.GetBytes + alokację byte[4]
+            exportData[offset]     = (byte)byteMetadata.Length;
+            exportData[offset + 1] = (byte)(byteMetadata.Length >> 8);
+            exportData[offset + 2] = (byte)(byteMetadata.Length >> 16);
+            exportData[offset + 3] = (byte)(byteMetadata.Length >> 24);
+            offset += 4;
+
+            Buffer.BlockCopy(byteMetadata, 0, exportData, offset, byteMetadata.Length); offset += byteMetadata.Length;
+            Buffer.BlockCopy(byteMain,     0, exportData, offset, byteMain.Length);
+
+            DNVEncryption.SimpleEncryptInPlace(exportData, _myProperties.DNVFrameEncryption);
             return exportData;
         }
 

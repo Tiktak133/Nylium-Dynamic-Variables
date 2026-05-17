@@ -138,7 +138,7 @@ namespace AdvancedDNV
                                     else
                                     {
                                         // Odbezpiecz Metadane
-                                        new DNVEncryption().SimpleEncryptInPlace(metadataData, _defaultProperties.MetadataEncryption);
+                                        DNVEncryption.SimpleEncryptInPlace(metadataData, _defaultProperties.MetadataEncryption);
 
                                         // Validate metadata header and create container or empty metadata if invalid
                                         int metadataEndIndex = 0;
@@ -153,7 +153,8 @@ namespace AdvancedDNV
                                         else
                                         {
                                             // Inicjalizujemy obiekty `Container`
-                                            _metadata = new Container(metadataData, null, new advInt32().Set(4), metadataEndIndex);
+                                            int metaStart = 4;
+                                            _metadata = new Container(metadataData, null, ref metaStart, metadataEndIndex);
                                         }
                                         mainData = reader.ReadBytes((int)(fs.Length - fs.Position));
 
@@ -199,7 +200,8 @@ namespace AdvancedDNV
                                             }
                                             else
                                             {
-                                                _conMain = new Container(mainData, null, new advInt32().Set(4), mainEndIndex);
+                                                int mainStart = 4;
+                                                _conMain = new Container(mainData, null, ref mainStart, mainEndIndex);
                                             }
                                         }
                                         _conMain.ValueUpdated += ConMain_ValueUpdated;
@@ -339,7 +341,7 @@ namespace AdvancedDNV
 
                         // Zabezpiecz Metadane
                         byte[] byteMetadata = _metadata.CompileContainer().ToArray();
-                        new DNVEncryption().SimpleEncryptInPlace(byteMetadata, _defaultProperties.MetadataEncryption);
+                        DNVEncryption.SimpleEncryptInPlace(byteMetadata, _defaultProperties.MetadataEncryption);
 
                         // Sprawdzamy, czy dane nie przekraczają maksymalnego rozmiaru
                         if (byteMain.Length + byteMetadata.Length + 4096 >= int.MaxValue)

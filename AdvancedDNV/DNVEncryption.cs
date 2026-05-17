@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections;
 using System.IO;
+using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 namespace AdvancedDNV
@@ -178,12 +180,45 @@ namespace AdvancedDNV
 
 
         // Szyfrowanie/deszyfrowanie metodą XOR bez alokacji dodatkowej pamięci - NIE STOSOWAĆ DO WAŻNYCH DANYCH
-        internal void SimpleEncryptInPlace(Span<byte> data, byte[] key)
+        internal static void SimpleEncryptInPlace(Span<byte> data, byte[] key)
         {
-            int keyLength = key.Length;
-            for (int i = 0; i < data.Length; i++)
+            if (data.IsEmpty) return;
+
+            int keyLen = key.Length;
+
+            // Rozwijamy klucz do długości = NWW(keyLen, Vector<byte>.Count) – jeden raz na wywołanie,
+            // żeby móc przetwarzać pełne wektory SIMD bez modulo w pętli.
+            int vecSize   = System.Numerics.Vector<byte>.Count; // 16 lub 32 zależnie od CPU
+            int expandLen = keyLen * vecSize;                   // NWW gdy vecSize jest potęgą 2
+            byte[] expanded = new byte[expandLen];
+            for (int i = 0; i < expandLen; i++)
+                expanded[i] = key[i % keyLen];
+
+            var keyVec = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, System.Numerics.Vector<byte>>(expanded);
+
+            int pos = 0;
+            int vecBlock = vecSize;
+
+            // Pętla SIMD – przetwarza vecSize bajtów naraz
+            int keyVecIdx = 0;
+            while (pos + vecBlock <= data.Length)
             {
-                data[i] ^= key[i % keyLength];
+                var dataSlice = System.Runtime.InteropServices.MemoryMarshal
+                    .Cast<byte, System.Numerics.Vector<byte>>(data.Slice(pos, vecBlock));
+                dataSlice[0] ^= keyVec[keyVecIdx % keyVec.Length];
+                pos       += vecBlock;
+                keyVecIdx++;
+            }
+
+            // Ogon – bajty których nie starczyło na pełny wektor, bez modulo
+            // Pozycja w kluczu na podstawie pos (już obliczonego)
+            int keyPos = pos % keyLen;
+            while (pos < data.Length)
+            {
+                data[pos] ^= key[keyPos];
+                pos++;
+                keyPos++;
+                if (keyPos == keyLen) keyPos = 0;
             }
         }
 

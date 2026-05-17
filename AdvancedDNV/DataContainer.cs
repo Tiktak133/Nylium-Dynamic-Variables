@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Runtime.InteropServices;
+using System.Text;
 
 namespace AdvancedDNV
 {
@@ -18,48 +19,44 @@ namespace AdvancedDNV
         public delegate void ValueUpdatedEventHandler();
         public event ValueUpdatedEventHandler? ValueUpdated;
 
-        DNVProperties _myProperties = new DNVProperties();
-        private readonly char[] _forbiddenCharsArray;
+        DNVProperties _myProperties = DNVProperties.Instance;
+        // Statyczna tablica współdzielona — zero alokacji per-Container przez cały czas życia procesu
+        private static readonly char[] _forbiddenCharsArray = DNVProperties.ForbiddenCharsArray;
 
         /// <summary>
         /// Creates a container based on the supplied Byte data
         /// </summary>
         /// <param name="bytes">Data to create the container tree</param>
-        internal Container(byte[] bytes, Container par, advInt32 lastIndex, int endIndex, char[]? forbiddenCharsCache = null)
+        internal Container(byte[] bytes, Container par, ref int lastIndex, int endIndex)
         {
-            if (forbiddenCharsCache != null)
-                _forbiddenCharsArray = forbiddenCharsCache;
-            else
-                _forbiddenCharsArray = _myProperties.forbiddenChars.ToArray();
-
-            ushort containerCount = BitConverter.ToUInt16(bytes, lastIndex.Get()); lastIndex.Add(2);
+            ushort containerCount = BitConverter.ToUInt16(bytes, lastIndex); lastIndex += 2;
             ushort ContainerNameCount = containerCount;
 
-            // thisContainer
-            ContainerList = new Dictionary<string, Container>();
-            ContainerName = Encoding.UTF8.GetString(bytes, lastIndex.Get(), ContainerNameCount); lastIndex.Add(ContainerNameCount);
+            // thisContainer — 4 jako pojemność startowa: większość kontenerów ma niewiele dzieci
+            ContainerList = new Dictionary<string, Container>(4);
+            ContainerName = Encoding.UTF8.GetString(bytes, lastIndex, ContainerNameCount); lastIndex += ContainerNameCount;
 
             this._parent = par;
 
-            while (StepContainer(bytes, lastIndex))
+            while (StepContainer(bytes, ref lastIndex))
             {
-                ushort typeCount = BitConverter.ToUInt16(bytes, lastIndex.Get());
+                ushort typeCount = BitConverter.ToUInt16(bytes, lastIndex);
                 const ushort ValueFlag = 32768;
                 if (typeCount >= ValueFlag)
                 {
                     // Value
-                    lastIndex.Add(2);
-                    int ValueNameCount = Convert.ToUInt16(typeCount - 32768);           
+                    lastIndex += 2;
+                    int ValueNameCount = typeCount - ValueFlag;
 
-                    string ValueName = Encoding.UTF8.GetString(bytes, lastIndex.Get(), ValueNameCount); lastIndex.Add(ValueNameCount);
+                    string ValueName = Encoding.UTF8.GetString(bytes, lastIndex, ValueNameCount); lastIndex += ValueNameCount;
                     var newValue = new Value(ValueName, this);
 
-                    byte TypeValue = bytes[lastIndex.Get()]; lastIndex.Add(1);
-                    uint StartIndexValue = BitConverter.ToUInt32(bytes, lastIndex.Get()); lastIndex.Add(4);
-                    uint OccupiedSpaceValue = BitConverter.ToUInt32(bytes, lastIndex.Get()) - 1; lastIndex.Add(4);
+                    byte TypeValue = bytes[lastIndex]; lastIndex += 1;
+                    uint StartIndexValue = BitConverter.ToUInt32(bytes, lastIndex); lastIndex += 4;
+                    uint OccupiedSpaceValue = BitConverter.ToUInt32(bytes, lastIndex) - 1; lastIndex += 4;
 
                     byte[] newValueData = new byte[OccupiedSpaceValue];
-                    Buffer.BlockCopy(bytes, endIndex + (int)StartIndexValue + 1, newValueData, 0, (int)OccupiedSpaceValue); // UWAGA +1 i -1 są ze względu na pierwszy byte zapisany w każdej zmiennej NA TEN MOMENT NIE UŻYWANY
+                    Buffer.BlockCopy(bytes, endIndex + (int)StartIndexValue + 1, newValueData, 0, (int)OccupiedSpaceValue);
 
                     if (_myProperties.TypeByByte.TryGetValue(TypeValue, out Type? t) && t != null)
                     {
@@ -76,19 +73,17 @@ namespace AdvancedDNV
                 else if (typeCount > 0)
                 {
                     //nextContainer
-                    this.InsertContainer(new Container(bytes, this, lastIndex, endIndex, _forbiddenCharsArray));
+                    this.InsertContainer(new Container(bytes, this, ref lastIndex, endIndex));
                 }
                 else
                 {
                     break;
-                }                  
+                }
             }
         }
 
         protected internal Container(string name, Container par)
         {
-            _forbiddenCharsArray = _myProperties.forbiddenChars.ToArray();
-
             // Zakoduj tylko wtedy, gdy nie wszystkie znaki są ASCII
             var nameb = Encoding.UTF8.GetByteCount(name);
             if (nameb >= 32768)
@@ -120,11 +115,11 @@ namespace AdvancedDNV
             }
         }
 
-        bool StepContainer(byte[] bytes, advInt32 lastIndex)
+        bool StepContainer(byte[] bytes, ref int lastIndex)
         {
-            if (bytes[lastIndex.Get()] == 0 && bytes[lastIndex.Get() + 1] == 0)
+            if (bytes[lastIndex] == 0 && bytes[lastIndex + 1] == 0)
             {
-                lastIndex.Add(2);
+                lastIndex += 2;
                 return false;
             }
             else
@@ -167,15 +162,22 @@ namespace AdvancedDNV
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            if (ValuesList.TryGetValue(key, out var existing))
-                return existing;
+            // Jeden lookup zamiast TryGetValue + TryAdd — CollectionsMarshal zwraca ref do slotu w słowniku
+            ref Value? slot = ref CollectionsMarshal.GetValueRefOrAddDefault(ValuesList, key, out bool existed);
+            if (existed)
+                return slot!;
 
-            // Szybkie sprawdzenie zakazanych znaków bez alokacji
+            // Nowy klucz — waliduj zakazane znaki dopiero teraz
             if (_forbiddenCharsArray.Length > 0 && key.IndexOfAny(_forbiddenCharsArray) >= 0)
+            {
+                // Cofnij dodanie pustego slotu
+                ValuesList.Remove(key);
                 throw new ArgumentException("A prohibited char was used");
+            }
 
             var newVal = new Value(key, this);
-            InsertValue(newVal);
+            slot = newVal;                     // wypełnij slot już istniejący w słowniku
+            GlobalValuesSet.Add(newVal);
             return newVal;
         }
 
@@ -294,53 +296,101 @@ namespace AdvancedDNV
         /// </summary>
         /// <returns></returns>
         /// <exception cref="Exception">Zbyt dużo danych kontenera</exception>
-        protected internal List<byte> CompileContainer()
+        protected internal byte[] CompileContainer()
         {
-            List<byte> result = new List<byte>();
-            List<byte> indexes = new List<byte>();
-            List<byte> data = new List<byte>();
+            // Szacujemy pojemność bufora zanim zaczniemy pisać — eliminuje realokacje MemoryStream
+            int estimatedSize = EstimateCompileSize(this);
+
+            using var indexes = new System.IO.MemoryStream(estimatedSize);
+            using var data    = new System.IO.MemoryStream(estimatedSize);
 
             GoDeeperCompileContainer(this, indexes, data);
 
-            if (indexes.Count() + data.Count() + 4 >= int.MaxValue)
+            long totalLen = indexes.Length + data.Length + 4;
+            if (totalLen >= int.MaxValue)
                 throw new Exception("DNV is too long");
 
-            result.AddRange(BitConverter.GetBytes(indexes.Count()+4)); //Wielkość całego indexu - x4byte
+            // Wynik: 4 bajty rozmiaru indeksu | indeks | dane
+            byte[] result = new byte[totalLen];
+            int offset = 0;
 
-            result.AddRange(indexes);
-            result.AddRange(data);
-            result.AddRange(data);
+            WriteInt32ToBuffer(result, offset, (int)(indexes.Length + 4)); offset += 4;
+
+            Buffer.BlockCopy(indexes.GetBuffer(), 0, result, offset, (int)indexes.Length); offset += (int)indexes.Length;
+            Buffer.BlockCopy(data.GetBuffer(),    0, result, offset, (int)data.Length);
+
             return result;
         }
 
-        protected private void GoDeeperCompileContainer(Container con, List<byte> indexes, List<byte> data)
+        /// <summary>
+        /// Szybki szacunek rozmiaru skompilowanego kontenera — bez alokacji, bez pisania bajtów.
+        /// Przybliżenie: 2 (nameLen) + UTF8(name) + 9 (per-value index) + value.Length + 1 (header) + 2 (end marker)
+        /// </summary>
+        private static int EstimateCompileSize(Container con)
         {
-            var insideValues = con.GetValues();
-            var insideContainers = con.GetContainers();
+            int size = 0;
+            EstimateRecursive(con, ref size);
+            return Math.Max(size, 64);
+        }
 
-            if (insideValues.Count() + insideContainers.Count() > 0) // Jeżeli w środku Containera coś się znajduje, w przeciwnym razie nie podlega kompilacji (wyginie)
+        private static void EstimateRecursive(Container con, ref int size)
+        {
+            if (con.ValuesList.Count + con.ContainerList.Count == 0) return;
+
+            // 2 (nameLen ushort) + UTF8 name bytes (ASCII fast-path: 1 byte/char)
+            size += 2 + con.ContainerName.Length;
+
+            foreach (var kv in con.ValuesList)
+            {
+                var v = kv.Value;
+                int valueLen = v.value?.Length ?? 0;
+                // index entry: 2 (flag+nameLen) + nameLen + 1 (type) + 4 (offset) + 4 (size) = 11 + nameLen
+                size += 11 + kv.Key.Length;
+                // data entry: 1 (header byte) + valueLen
+                size += 1 + valueLen;
+            }
+
+            foreach (var kv in con.ContainerList)
+                EstimateRecursive(kv.Value, ref size);
+
+            size += 2; // end marker
+        }
+
+        private static void WriteInt32ToBuffer(byte[] buf, int offset, int value)
+        {
+            buf[offset]     = (byte)value;
+            buf[offset + 1] = (byte)(value >> 8);
+            buf[offset + 2] = (byte)(value >> 16);
+            buf[offset + 3] = (byte)(value >> 24);
+        }
+
+        protected private void GoDeeperCompileContainer(Container con, System.IO.MemoryStream indexes, System.IO.MemoryStream data)
+        {
+            var insideValues = con.ValuesList;
+            var insideContainers = con.ContainerList;
+
+            if (insideValues.Count + insideContainers.Count > 0)
             {
                 string name = con.ContainerName;
                 byte[] stringBytes = Encoding.UTF8.GetBytes(name);
-                ushort nameLength = Convert.ToUInt16(stringBytes.Count());
+                ushort nameLength = Convert.ToUInt16(stringBytes.Length);
                 if (nameLength >= 32768)
                     throw new ArgumentException("Container name is too long");
 
-                indexes.AddRange(BitConverter.GetBytes(nameLength)); // Dodawanie długości nazwy kontenera
-                indexes.AddRange(stringBytes); // Dodawanie nazwy w UTF8 kontenera
+                // stackalloc: zero alokacji na stercie dla 2-bajtowego nagłówka nazwy
+                Span<byte> nameLenBuf = stackalloc byte[2];
+                nameLenBuf[0] = (byte)nameLength;
+                nameLenBuf[1] = (byte)(nameLength >> 8);
+                indexes.Write(nameLenBuf);
+                indexes.Write(stringBytes);
 
-                
-                foreach (var value in insideValues)
-                {
-                    value.GetBytes(indexes, data);
-                }
+                foreach (var kv in insideValues)
+                    kv.Value.GetBytes(indexes, data);
 
-                foreach (var con_in in insideContainers)
-                {
-                    GoDeeperCompileContainer(con_in, indexes, data);
-                }
+                foreach (var kv in insideContainers)
+                    GoDeeperCompileContainer(kv.Value, indexes, data);
 
-                indexes.Add(0); indexes.Add(0); // Informacja o końcu kontenera
+                indexes.WriteByte(0); indexes.WriteByte(0);
             }
         }
 

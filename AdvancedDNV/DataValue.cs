@@ -1,4 +1,6 @@
 ﻿using System.Text;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace AdvancedDNV
 {
@@ -17,8 +19,8 @@ namespace AdvancedDNV
         internal Type? type = null; //Typ wartości
         internal byte[]? value;
 
-        DNVProperties _myProperties = new();
-        private object _engagedElementLock; // Blokuje dostęp do Value, gdy jest on używany przez inny wątek
+        DNVProperties _myProperties = DNVProperties.Instance;
+        private readonly Lock _engagedElementLock = new Lock(); // System.Threading.Lock (.NET 9+) – szybszy niż lock(object)
 
         internal Value(string name, Container par)
         {
@@ -28,7 +30,6 @@ namespace AdvancedDNV
 
             ValueName = name;
             _parent = par;
-            _engagedElementLock = new object();
         }
 
         /// <summary>
@@ -192,6 +193,197 @@ namespace AdvancedDNV
         }
 
         /// <summary>
+        // ── Typowane przeciążenia Set – eliminują dynamic/DLR/boxing ──────────
+
+        public Value Set(bool value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = BitConverter.GetBytes(value);
+                type = typeof(bool);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(int value)
+        {
+            lock (_engagedElementLock)
+            {
+                if (value >= 0 && value <= byte.MaxValue)
+                {
+                    this.value = new byte[] { (byte)value };
+                    type = typeof(byte);
+                }
+                else if (value >= short.MinValue && value <= short.MaxValue)
+                {
+                    this.value = BitConverter.GetBytes((short)value);
+                    type = typeof(short);
+                }
+                else
+                {
+                    this.value = BitConverter.GetBytes(value);
+                    type = typeof(int);
+                }
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(long value)
+        {
+            lock (_engagedElementLock)
+            {
+                if (value >= 0 && value <= byte.MaxValue)
+                {
+                    this.value = new byte[] { (byte)value };
+                    type = typeof(byte);
+                }
+                else if (value >= short.MinValue && value <= short.MaxValue)
+                {
+                    this.value = BitConverter.GetBytes((short)value);
+                    type = typeof(short);
+                }
+                else if (value >= int.MinValue && value <= int.MaxValue)
+                {
+                    this.value = BitConverter.GetBytes((int)value);
+                    type = typeof(int);
+                }
+                else
+                {
+                    this.value = BitConverter.GetBytes(value);
+                    type = typeof(long);
+                }
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(double value)
+        {
+            lock (_engagedElementLock)
+            {
+                if ((double)(float)value == value)
+                {
+                    this.value = BitConverter.GetBytes((float)value);
+                    type = typeof(float);
+                }
+                else
+                {
+                    this.value = BitConverter.GetBytes(value);
+                    type = typeof(double);
+                }
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(float value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = BitConverter.GetBytes(value);
+                type = typeof(float);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(string value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = Encoding.UTF8.GetBytes(value);
+                type = typeof(string);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(Guid value)
+        {
+            lock (_engagedElementLock)
+            {
+                if (value == Guid.Empty) throw new ArgumentException("Guid cannot be empty");
+                this.value = value.ToByteArray();
+                type = typeof(Guid);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(DateTime value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = BitConverter.GetBytes(value.Ticks);
+                type = typeof(DateTime);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(TimeSpan value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = BitConverter.GetBytes(value.Ticks);
+                type = typeof(TimeSpan);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(byte value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = new byte[] { value };
+                type = typeof(byte);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(byte[] value)
+        {
+            lock (_engagedElementLock)
+            {
+                this.value = value;
+                type = typeof(byte[]);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(int[] value)
+        {
+            lock (_engagedElementLock)
+            {
+                var bytes = new byte[value.Length * sizeof(int)];
+                Buffer.BlockCopy(value, 0, bytes, 0, bytes.Length);
+                this.value = bytes;
+                type = typeof(int[]);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        public Value Set(double[] value)
+        {
+            lock (_engagedElementLock)
+            {
+                var bytes = new byte[value.Length * sizeof(double)];
+                Buffer.BlockCopy(value, 0, bytes, 0, bytes.Length);
+                this.value = bytes;
+                type = typeof(double[]);
+                _parent?.OnValueUpdated();
+            }
+            return this;
+        }
+
+        // ── Oryginalna metoda Set(dynamic?) – ścieżka awaryjna dla pozostałych typów ─
+
         /// Setting a value to an object
         /// </summary>
         /// <param name="value"></param>
@@ -417,6 +609,128 @@ namespace AdvancedDNV
             return this;
         }
 
+        // Szybkie odczytanie wartości bez boxing – dekoduje według zapisanego this.type, konwertuje do T.
+        // Używa MemoryMarshal.Read (brak bounds-check) + Unsafe.As (brak box/unbox) dla typów unmanaged.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private T ReadAs<T>()
+        {
+            var span = value.AsSpan();
+
+            // ── Typy całkowite ────────────────────────────────────────────────
+            if (typeof(T) == typeof(int) || typeof(T) == typeof(long) ||
+                typeof(T) == typeof(short) || typeof(T) == typeof(byte) ||
+                typeof(T) == typeof(uint) || typeof(T) == typeof(ulong) ||
+                typeof(T) == typeof(ushort))
+            {
+                long raw;
+                if      (type == typeof(byte))   raw = span[0];
+                else if (type == typeof(short))  raw = MemoryMarshal.Read<short>(span);
+                else if (type == typeof(ushort)) raw = MemoryMarshal.Read<ushort>(span);
+                else if (type == typeof(int))    raw = MemoryMarshal.Read<int>(span);
+                else if (type == typeof(uint))   raw = MemoryMarshal.Read<uint>(span);
+                else if (type == typeof(long))   raw = MemoryMarshal.Read<long>(span);
+                else if (type == typeof(ulong))
+                {
+                    ulong u = MemoryMarshal.Read<ulong>(span);
+                    return Unsafe.As<ulong, T>(ref u);
+                }
+                else return (T)transformToType(type)!;
+
+                if (typeof(T) == typeof(int))    { int    v = (int)raw;    return Unsafe.As<int,    T>(ref v); }
+                if (typeof(T) == typeof(long))   { long   v = raw;         return Unsafe.As<long,   T>(ref v); }
+                if (typeof(T) == typeof(short))  { short  v = (short)raw;  return Unsafe.As<short,  T>(ref v); }
+                if (typeof(T) == typeof(byte))   { byte   v = (byte)raw;   return Unsafe.As<byte,   T>(ref v); }
+                if (typeof(T) == typeof(uint))   { uint   v = (uint)raw;   return Unsafe.As<uint,   T>(ref v); }
+                if (typeof(T) == typeof(ulong))  { ulong  v = (ulong)raw;  return Unsafe.As<ulong,  T>(ref v); }
+                if (typeof(T) == typeof(ushort)) { ushort v = (ushort)raw; return Unsafe.As<ushort, T>(ref v); }
+            }
+
+            // ── Typy zmiennoprzecinkowe ───────────────────────────────────────
+            if (typeof(T) == typeof(double))
+            {
+                double v = type == typeof(float)
+                    ? MemoryMarshal.Read<float>(span)
+                    : type == typeof(double)
+                        ? MemoryMarshal.Read<double>(span)
+                        : (double)transformToType(type)!;
+                return Unsafe.As<double, T>(ref v);
+            }
+            if (typeof(T) == typeof(float))
+            {
+                float v = type == typeof(float)
+                    ? MemoryMarshal.Read<float>(span)
+                    : type == typeof(double)
+                        ? (float)MemoryMarshal.Read<double>(span)
+                        : (float)transformToType(type)!;
+                return Unsafe.As<float, T>(ref v);
+            }
+
+            // ── Typy skalarne / referencyjne ─────────────────────────────────
+            if (typeof(T) == typeof(bool))
+            {
+                bool v = span[0] != 0;
+                return Unsafe.As<bool, T>(ref v);
+            }
+            if (typeof(T) == typeof(decimal))
+            {
+                decimal v = MemoryMarshal.Read<decimal>(span);
+                return Unsafe.As<decimal, T>(ref v);
+            }
+            if (typeof(T) == typeof(DateTime))
+            {
+                DateTime v = new DateTime(MemoryMarshal.Read<long>(span));
+                return Unsafe.As<DateTime, T>(ref v);
+            }
+            if (typeof(T) == typeof(TimeSpan))
+            {
+                TimeSpan v = new TimeSpan(MemoryMarshal.Read<long>(span));
+                return Unsafe.As<TimeSpan, T>(ref v);
+            }
+            if (typeof(T) == typeof(Guid))
+            {
+                Guid v = MemoryMarshal.Read<Guid>(span);
+                return Unsafe.As<Guid, T>(ref v);
+            }
+            if (typeof(T) == typeof(string))    return (T)(object)Encoding.UTF8.GetString(span);
+            if (typeof(T) == typeof(byte[]))
+            {
+                byte[] result = span.ToArray();
+                return (T)(object)result;
+            }
+            if (typeof(T) == typeof(int[]))
+            {
+                int[] arr = new int[value.Length / sizeof(int)];
+                Buffer.BlockCopy(value, 0, arr, 0, value.Length);
+                return (T)(object)arr;
+            }
+            if (typeof(T) == typeof(long[]))
+            {
+                long[] arr = new long[value.Length / sizeof(long)];
+                Buffer.BlockCopy(value, 0, arr, 0, value.Length);
+                return (T)(object)arr;
+            }
+            if (typeof(T) == typeof(double[]))
+            {
+                double[] arr = new double[value.Length / sizeof(double)];
+                Buffer.BlockCopy(value, 0, arr, 0, value.Length);
+                return (T)(object)arr;
+            }
+            if (typeof(T) == typeof(string[]))
+            {
+                var list = new List<string>();
+                int idx = 0;
+                while (idx < value.Length)
+                {
+                    int len = MemoryMarshal.Read<int>(span.Slice(idx)); idx += 4;
+                    list.Add(Encoding.UTF8.GetString(span.Slice(idx, len))); idx += len;
+                }
+                return (T)(object)list.ToArray();
+            }
+
+            // Fallback przez transformToType (typy nieznane)
+            return (T)transformToType(type)!;
+        }
+
         private dynamic? transformToType(Type? in_type)
         {
             if (value == null || in_type == null || value.Length == 0)
@@ -467,6 +781,7 @@ namespace AdvancedDNV
             }
             else if (in_type == typeof(int[]))
             {
+
                 int[] liczbyIntOdwrotnie = new int[value.Length / sizeof(int)];
                 Buffer.BlockCopy(value, 0, liczbyIntOdwrotnie, 0, value.Length);
 
@@ -519,10 +834,8 @@ namespace AdvancedDNV
             lock (_engagedElementLock)
             {
                 if (value != null && value.Length > 0)
-                {
-                    return (T)transformToType(type);
-                }
-                return (T)(object)null;
+                    return ReadAs<T>();
+                return default!;
             }
         }
 
@@ -583,38 +896,34 @@ namespace AdvancedDNV
             parent.OnValueUpdated();
         }
 
-        protected internal void GetBytes(List<byte> indexes, List<byte> data)
+        protected internal void GetBytes(System.IO.MemoryStream indexes, System.IO.MemoryStream data)
         {
-            lock ( _engagedElementLock )
+            lock (_engagedElementLock)
             {
                 if (value == null || value.Length == 0 || Type == null || !_myProperties.ListOfTypes.TryGetValue(Type, out var typeByte))
                     return;
 
-                string name = this.ValueName;
                 byte[] nameBytes = Encoding.UTF8.GetBytes(ValueName);
                 int nameLength = nameBytes.Length;
                 if (nameLength >= 32768)
                     throw new ArgumentException("Value name is too long");
 
-                // INDEX
-                List<byte> newIndexes = new List<byte>();
-                newIndexes.AddRange(BitConverter.GetBytes((ushort)(nameLength + 32768))); //Dodawanie długości wartości nazwy (+1 bit na samym przodzie określający, że jest to Value, a nie Container)
-                newIndexes.AddRange(nameBytes); //Dodawanie nazwy wartości w UTF8 
-                newIndexes.Add(typeByte); //Typ zmiennej
+                // INDEX – flaga Value w najwyższym bicie
+                indexes.Write(BitConverter.GetBytes((ushort)(nameLength + 32768)));
+                indexes.Write(nameBytes);
+                indexes.WriteByte(typeByte);
 
-                //DATA
-                var newData = new List<byte>();
-                newData.Add(0); //Dodatkowe dane do zmiennej [aktualnie nie wykorzystane 0 - brak danych]
-                newData.AddRange(value);
+                // Pozycja danych zanim zapiszemy nową wartość
+                uint dataOffset = (uint)data.Length;
+                uint dataSize   = (uint)(value.Length + 1); // +1 za bajt nagłówkowy
 
-                //INDEX FINISHING
-                newIndexes.AddRange(BitConverter.GetBytes((uint)data.Count)); //Ostatni index z sekcji Data do którego będą przypisane dane z tej WARTOŚCI (VALUE) - miejsce zapisu danych dla tego obiektu VALUE
-                newIndexes.AddRange(BitConverter.GetBytes((uint)newData.Count)); //Ilość bajtów która zostaje zarezerwowana w sekcji Data
+                indexes.Write(BitConverter.GetBytes(dataOffset));
+                indexes.Write(BitConverter.GetBytes(dataSize));
 
-                //COMPILE
-                indexes.AddRange(newIndexes);
-                data.AddRange(newData);
-            }        
+                // DATA
+                data.WriteByte(0); // bajt nagłówkowy [nieużywany]
+                data.Write(value, 0, value.Length);
+            }
         }
     }
 }

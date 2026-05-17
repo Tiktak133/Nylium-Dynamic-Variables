@@ -8,6 +8,10 @@ namespace AdvancedDNV
 {
     internal class DNVProperties
     {
+        // Singleton – eliminuje tysiące zbędnych alokacji słowników przy każdym Container/Value
+        private static readonly DNVProperties _instance = new DNVProperties();
+        internal static DNVProperties Instance => _instance;
+
         internal DNVProperties()
         {
             // Właściwości są inicjalizowane w konstruktorze, aby zapewnić, że są dostępne przed użyciem
@@ -21,6 +25,9 @@ namespace AdvancedDNV
         /// Lista zakazanych znaków specjalnych
         /// </summary>
         internal readonly HashSet<char> forbiddenChars = new HashSet<char> { '@', '#', '$', '%', '^', '*', '{', '}', '[', ']', '|', ':', ';', '\'', '"', '<', '>', '?', '/', '\\' };
+
+        // Tablica zawierająca te same znaki — jedna instancja na cały proces, bez alokacji per-Container
+        internal static readonly char[] ForbiddenCharsArray = { '@', '#', '$', '%', '^', '*', '{', '}', '[', ']', '|', ':', ';', '\'', '"', '<', '>', '?', '/', '\\' };
 
         internal readonly byte[] MetadataEncryption = new byte[] { 21, 37, 69, 62, 21, 68, 27, 15, 32, 8 , 182};
         internal readonly byte[] DNVFrameEncryption = new byte[] { 21, 72, 35, 223, 12, 23, 6, 1, 138, 12, 193 };
