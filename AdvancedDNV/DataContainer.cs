@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Buffers;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace AdvancedDNV
@@ -62,6 +63,7 @@ namespace AdvancedDNV
                     {
                         newValue.type = t;
                         newValue.value = newValueData;
+                        newValue._valueLen = newValueData.Length;
 
                         this.InsertValue(newValue);
                     }
@@ -201,13 +203,17 @@ namespace AdvancedDNV
         /// <summary>
         /// Deprecated data placement, use newer Value.Set(value) function
         /// </summary>
+        /// <remarks>
+        /// <b>Migration note:</b> Use <c>container.Value(name).Set(value)</c> directly.
+        /// </remarks>
+        [Obsolete("Use container.Value(name).Set(value) instead. This overload uses DLR dispatch via dynamic.")]
         public Container SetValue(string name, dynamic? value)
         {
-            this.Value(name).Set(value);
+            this.Value(name).Set((object?)value);
             return this;
         }
 
-        public Container SetValues(params (string name, dynamic? value)[] values)
+        public Container SetValues(params (string name, object? value)[] values)
         {
             HashSet<string> uniqueNames = new HashSet<string>();
 
@@ -222,8 +228,12 @@ namespace AdvancedDNV
         }
 
         /// <summary>
-        /// Deprecated data retrieval, use newer Value.Get<T>() function
+        /// Deprecated data retrieval, use newer Value.Get&lt;T&gt;() function
         /// </summary>
+        /// <remarks>
+        /// <b>Migration note:</b> Call <c>objectV.Get&lt;T&gt;()</c> directly.
+        /// </remarks>
+        [Obsolete("Call objectV.Get<T>() directly instead.")]
         public T GetValue<T>(Value objectV)
         {
             return objectV.Get<T>();
@@ -232,6 +242,10 @@ namespace AdvancedDNV
         /// <summary>
         /// Deprecated data retrieval, use newer Value.Get(defaultOut) function
         /// </summary>
+        /// <remarks>
+        /// <b>Migration note:</b> Call <c>objectV.Get&lt;T&gt;(defaultOut)</c> directly.
+        /// </remarks>
+        [Obsolete("Call objectV.Get<T>(defaultOut) directly instead.")]
         public dynamic GetValue(Value objectV, dynamic defaultOut)
         {
             return objectV.Get(defaultOut);
@@ -240,16 +254,28 @@ namespace AdvancedDNV
         /// <summary>
         /// Deprecated data retrieval, use newer Value.Get() function
         /// </summary>
+        /// <remarks>
+        /// <b>Migration note:</b> Call <c>objectV.Get&lt;T&gt;()</c> directly.
+        /// </remarks>
+        [Obsolete("Call objectV.Get<T>() directly instead.")]
         public dynamic? GetValue(Value objectV)
         {
             return objectV.Get();
         }
 
+        /// <remarks>
+        /// <b>Migration note:</b> Use <c>container.Value(name).Get&lt;T&gt;()</c> instead.
+        /// </remarks>
+        [Obsolete("Use container.Value(name).Get<T>() instead.")]
         public dynamic? GetValue(string name)
         {
             return this.Value(name).Get();
         }
 
+        /// <remarks>
+        /// <b>Migration note:</b> Use <c>container.Value(name).Get&lt;T&gt;(defaultOut)</c> instead.
+        /// </remarks>
+        [Obsolete("Use container.Value(name).Get<T>(defaultOut) instead.")]
         public dynamic? GetValue(string name, dynamic? defaultOut)
         {
             return this.Value(name).Get(defaultOut);
@@ -372,17 +398,27 @@ namespace AdvancedDNV
             if (insideValues.Count + insideContainers.Count > 0)
             {
                 string name = con.ContainerName;
-                byte[] stringBytes = Encoding.UTF8.GetBytes(name);
-                ushort nameLength = Convert.ToUInt16(stringBytes.Length);
-                if (nameLength >= 32768)
-                    throw new ArgumentException("Container name is too long");
+                int maxBytes = Encoding.UTF8.GetMaxByteCount(name.Length);
+                // ArrayPool: brak alokacji na stercie dla nazwy kontenera podczas serializacji
+                byte[] rentedBuf = ArrayPool<byte>.Shared.Rent(maxBytes);
+                int nameLength;
+                try
+                {
+                    nameLength = Encoding.UTF8.GetBytes(name, 0, name.Length, rentedBuf, 0);
+                    if (nameLength >= 32768)
+                        throw new ArgumentException("Container name is too long");
 
-                // stackalloc: zero alokacji na stercie dla 2-bajtowego nagłówka nazwy
-                Span<byte> nameLenBuf = stackalloc byte[2];
-                nameLenBuf[0] = (byte)nameLength;
-                nameLenBuf[1] = (byte)(nameLength >> 8);
-                indexes.Write(nameLenBuf);
-                indexes.Write(stringBytes);
+                    // stackalloc: 2 bajty nagłówka nazwy — zero alokacji na stercie
+                    Span<byte> nameLenBuf = stackalloc byte[2];
+                    nameLenBuf[0] = (byte)nameLength;
+                    nameLenBuf[1] = (byte)(nameLength >> 8);
+                    indexes.Write(nameLenBuf);
+                    indexes.Write(rentedBuf, 0, nameLength);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rentedBuf);
+                }
 
                 foreach (var kv in insideValues)
                     kv.Value.GetBytes(indexes, data);

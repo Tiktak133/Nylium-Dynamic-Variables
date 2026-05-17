@@ -159,13 +159,13 @@ namespace AdvancedDNV
                                         mainData = reader.ReadBytes((int)(fs.Length - fs.Position));
 
                                         // Odszyfrowywanie zawartości
-                                        byte[] salt = _metadata["encryption"].Value("salt").Get(new byte[0]);
+                                        byte[] salt = _metadata["encryption"].Value("salt").Get<byte[]>() ?? new byte[0];
                                         if (salt.Length > 0)
                                         {
                                             if (Pass != string.Empty)
                                             {
-                                                byte[] controlBlock = _metadata["encryption"].Value("controlBlock").Get(new byte[0]);
-                                                short securityLevel = _metadata["encryption"].Value("securityLevel").Get();
+                                                byte[] controlBlock = _metadata["encryption"].Value("controlBlock").Get<byte[]>() ?? new byte[0];
+                                                short securityLevel = _metadata["encryption"].Value("securityLevel").Get<short>();
                                                 if (controlBlock.Length > 0)
                                                 {
                                                     byte[] Key = null; byte[] IV = null;
@@ -181,7 +181,7 @@ namespace AdvancedDNV
                                         }
 
                                         // Dekompresuj zawartość
-                                        if (_metadata["compression"].Value("enable").Get(false))
+                                        if (_metadata["compression"].Value("enable").Get<bool>())
                                         {
                                             mainData = new ZstdHelper().Decompress(mainData);
                                         }
@@ -432,7 +432,7 @@ namespace AdvancedDNV
                     if (defaultValue == null)
                         return section.Value(subkey ?? key).Get<T>();
                     else
-                        return section.Value(subkey ?? key).Get(defaultValue);
+                        return section.Value(subkey ?? key).Get<T>();
                 }
                 else
                 {

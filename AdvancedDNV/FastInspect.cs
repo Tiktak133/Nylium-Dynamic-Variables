@@ -142,28 +142,89 @@
             }
         }
 
+        private static readonly HashSet<Type> _arrayTypes = new()
+        {
+            typeof(byte[]), typeof(int[]), typeof(long[]), typeof(double[]), typeof(string[]),
+            typeof(List<int>), typeof(List<long>), typeof(List<double>), typeof(List<string>)
+        };
+
+        private static readonly HashSet<Type> _supportedTypes = new()
+        {
+            typeof(bool), typeof(byte), typeof(short), typeof(ushort),
+            typeof(int), typeof(uint), typeof(long), typeof(ulong),
+            typeof(float), typeof(double), typeof(decimal),
+            typeof(Guid), typeof(DateTime), typeof(TimeSpan), typeof(string),
+            typeof(byte[]), typeof(int[]), typeof(long[]), typeof(double[]), typeof(string[]),
+            typeof(List<int>), typeof(List<long>), typeof(List<double>), typeof(List<string>)
+        };
+
+        private static readonly Dictionary<Type, string> _typeDisplayNames = new()
+        {
+            [typeof(List<int>)]    = "Int32[]",
+            [typeof(List<long>)]   = "Int64[]",
+            [typeof(List<double>)] = "Double[]",
+            [typeof(List<string>)] = "String[]",
+        };
+
         private static void PrintValueLine(Value value, string indent, string connector)
         {
             Cw(ConsoleColor.White,  indent + connector);
             Cw(ConsoleColor.Yellow, value.ValueName);
             Cw(ConsoleColor.White,  " : ");
 
-            var output = value.Get();
-            if (output == null)
+            var valueType = value.Type;
+            string typeLabel = valueType == null ? "NULL"
+                : _typeDisplayNames.TryGetValue(valueType, out var mapped) ? mapped
+                : valueType.Name;
+
+            if (!value.IsSet() || valueType == null)
             {
                 Cw(ConsoleColor.DarkGray, "NULL");
             }
-            else if (value.Type == typeof(byte[]) || value.Type == typeof(int[]) ||
-                     value.Type == typeof(double[]) || value.Type == typeof(string[]))
+            else if (_arrayTypes.Contains(valueType))
             {
-                Cw(ConsoleColor.DarkYellow, $"[{output.Length} items]");
+                int count = GetArrayCount(value, valueType);
+                if (count == 0 && !value.IsSet())
+                    Cw(ConsoleColor.DarkGray, "NULL");
+                else
+                    Cw(ConsoleColor.DarkYellow, $"[{count} items]");
+            }
+            else if (_supportedTypes.Contains(valueType))
+            {
+                try
+                {
+                    var output = value.Get();
+                    Cw(ConsoleColor.Green, output?.ToString() ?? "NULL");
+                }
+                catch
+                {
+                    Cw(ConsoleColor.DarkGray, "NULL");
+                }
             }
             else
             {
-                Cw(ConsoleColor.Green, $"{output}");
+                Cw(ConsoleColor.DarkGray, "NULL");
             }
 
-            Cwl(ConsoleColor.DarkGray, $"  [{value.Type?.Name ?? "NULL"}]");
+            Cwl(ConsoleColor.DarkGray, $"  [{typeLabel}]");
+        }
+
+        private static int GetArrayCount(Value value, Type arrayType)
+        {
+            try
+            {
+                if (arrayType == typeof(byte[]))         return value.Get<byte[]>()?.Length ?? 0;
+                if (arrayType == typeof(int[]))          return value.Get<int[]>()?.Length ?? 0;
+                if (arrayType == typeof(long[]))         return value.Get<long[]>()?.Length ?? 0;
+                if (arrayType == typeof(double[]))       return value.Get<double[]>()?.Length ?? 0;
+                if (arrayType == typeof(string[]))       return value.Get<string[]>()?.Length ?? 0;
+                if (arrayType == typeof(List<int>))      return value.Get<List<int>>()?.Count ?? 0;
+                if (arrayType == typeof(List<long>))     return value.Get<List<long>>()?.Count ?? 0;
+                if (arrayType == typeof(List<double>))   return value.Get<List<double>>()?.Count ?? 0;
+                if (arrayType == typeof(List<string>))   return value.Get<List<string>>()?.Count ?? 0;
+            }
+            catch { }
+            return 0;
         }
 
         private static void PrintStructure(Container con, string indent, string connector)

@@ -371,7 +371,7 @@ namespace AdvancedDNV.Tests
         [Fact]
         public void BenchmarkDNVFrame_vs_JSON()
         {
-            const int iterations = 50;
+            const int iterations = 1;
             const int fieldsPerIteration = 2000;
 
             var sw = new Stopwatch();

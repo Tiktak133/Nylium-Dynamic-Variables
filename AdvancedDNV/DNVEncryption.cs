@@ -9,6 +9,8 @@ namespace AdvancedDNV
 {
     internal class DNVEncryption
     {
+        // ThreadStatic: każdy wątek ma własny bufor — zero alokacji po pierwszym wywołaniu per wątek
+        [ThreadStatic] private static byte[]? _expandedBuf;
         private DateTime lastAttemptTime = DateTime.MinValue;
 
         // Funkcja do generowania klucza AES z hasła
@@ -190,7 +192,11 @@ namespace AdvancedDNV
             // żeby móc przetwarzać pełne wektory SIMD bez modulo w pętli.
             int vecSize   = System.Numerics.Vector<byte>.Count; // 16 lub 32 zależnie od CPU
             int expandLen = keyLen * vecSize;                   // NWW gdy vecSize jest potęgą 2
-            byte[] expanded = new byte[expandLen];
+
+            // Reu\u017cywamy bufor per-wątek — alokacja tylko przy pierwszym wywołaniu lub gdy klucz jest dłuższy
+            if (_expandedBuf == null || _expandedBuf.Length < expandLen)
+                _expandedBuf = new byte[expandLen];
+            byte[] expanded = _expandedBuf;
             for (int i = 0; i < expandLen; i++)
                 expanded[i] = key[i % keyLen];
 
