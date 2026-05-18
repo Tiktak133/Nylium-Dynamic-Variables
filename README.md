@@ -119,11 +119,14 @@ Represents a single stored variable.
 
 ```csharp
 // Setting data to value (two ways)
-user.SetValue("Name", "Tiktak133");
+user.SetValues(
+ ("Name", "Tiktak133"),
+ ("tmp", 69)
+);
 user.Value("Name").Set("Tiktak133");
 
 // Extracting data
-string? nickName = user.Value("Name").Get(); 
+string? nickName = user.Value("Name").Get<string?>(); 
 ```
 
 ---
@@ -208,7 +211,7 @@ DNVFrame frame = new DNVFrame(payload);
 
 // Using imported data (two ways)
 int? volume = frame.main["Settings"].Value("Volume").Get<int?>();
-dynamic volume = frame.main["Settings"].Value("Volume").Get();
+int volume = frame.main["Settings"].Value("Volume").Get(30);
 ```
 
 ---
