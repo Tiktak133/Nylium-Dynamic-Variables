@@ -507,7 +507,10 @@ namespace AdvancedDNV
             }
             if (typeof(T) == typeof(decimal))
             {
-                decimal v = MemoryMarshal.Read<decimal>(span);
+                decimal v;
+                if (type == typeof(float))       v = (decimal)MemoryMarshal.Read<float>(span);
+                else if (type == typeof(double)) v = (decimal)MemoryMarshal.Read<double>(span);
+                else                             v = MemoryMarshal.Read<decimal>(span);
                 return Unsafe.As<decimal, T>(ref v);
             }
             if (typeof(T) == typeof(DateTime))
@@ -621,7 +624,12 @@ namespace AdvancedDNV
                 return (object)Convert.ToDouble(transformToType(type));
             }
             if (inner == typeof(bool))      return (object)(span[0] != 0);
-            if (inner == typeof(decimal))   return (object)MemoryMarshal.Read<decimal>(span);
+            if (inner == typeof(decimal))
+            {
+                if (type == typeof(float))       return (object)(decimal)MemoryMarshal.Read<float>(span);
+                if (type == typeof(double))      return (object)(decimal)MemoryMarshal.Read<double>(span);
+                return (object)MemoryMarshal.Read<decimal>(span);
+            }
             if (inner == typeof(DateTime))  return (object)new DateTime(MemoryMarshal.Read<long>(span));
             if (inner == typeof(TimeSpan))  return (object)new TimeSpan(MemoryMarshal.Read<long>(span));
             if (inner == typeof(Guid))      return (object)MemoryMarshal.Read<Guid>(span);
@@ -897,9 +905,12 @@ namespace AdvancedDNV
                 _parent = null; // zerwij wcześnie
             }
 
-            // USUWANIE POZA LOCKIEM (ważne)
-            parent.ValuesList.Remove(ValueName);
-            parent.GlobalValuesSet.Remove(this);
+            // USUWANIE pod lockiem kontenera
+            lock (parent._collectionsLock)
+            {
+                parent.ValuesList.Remove(ValueName);
+                parent.GlobalValuesSet.Remove(this);
+            }
             parent.OnValueUpdated();
         }
 

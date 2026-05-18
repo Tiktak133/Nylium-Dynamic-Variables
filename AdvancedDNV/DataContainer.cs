@@ -15,6 +15,7 @@ namespace AdvancedDNV
         internal Dictionary<string, Container> ContainerList;
         internal Dictionary<string, Value> ValuesList = new();
         private Container? _parent;
+        internal readonly object _collectionsLock = new object();
 
         // Zaktualizowno jakąś wartość - potrzebne do auto zapisu
         public delegate void ValueUpdatedEventHandler();
@@ -100,20 +101,23 @@ namespace AdvancedDNV
         {
             get
             {
-                if (!this.ContainerList.ContainsKey(key))
+                lock (_collectionsLock)
                 {
-                    // Sprawdzanie, czy ciąg znaków zawiera jakiekolwiek z zakazanych znaków
-                    foreach (char c in _forbiddenCharsArray)
+                    if (!this.ContainerList.ContainsKey(key))
                     {
-                        if (key.Contains(c))
+                        // Sprawdzanie, czy ciąg znaków zawiera jakiekolwiek z zakazanych znaków
+                        foreach (char c in _forbiddenCharsArray)
                         {
-                            throw new Exception("A prohibited char was used: " + c);
+                            if (key.Contains(c))
+                            {
+                                throw new Exception("A prohibited char was used: " + c);
+                            }
                         }
-                    }
 
-                    this.InsertContainer(new Container(key, this));
+                        this.InsertContainerLocked(new Container(key, this));
+                    }
+                    return this.ContainerList[key];
                 }
-                return this.ContainerList[key];
             }
         }
 
@@ -136,6 +140,14 @@ namespace AdvancedDNV
         }
 
         internal void InsertContainer(Container con)
+        {
+            lock (_collectionsLock)
+            {
+                InsertContainerLocked(con);
+            }
+        }
+
+        private void InsertContainerLocked(Container con)
         {
             if (con == null)
                 throw new ArgumentNullException(nameof(con));
@@ -164,39 +176,45 @@ namespace AdvancedDNV
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
 
-            // Jeden lookup zamiast TryGetValue + TryAdd — CollectionsMarshal zwraca ref do slotu w słowniku
-            ref Value? slot = ref CollectionsMarshal.GetValueRefOrAddDefault(ValuesList, key, out bool existed);
-            if (existed)
-                return slot!;
-
-            // Nowy klucz — waliduj zakazane znaki dopiero teraz
-            if (_forbiddenCharsArray.Length > 0 && key.IndexOfAny(_forbiddenCharsArray) >= 0)
+            lock (_collectionsLock)
             {
-                // Cofnij dodanie pustego slotu
-                ValuesList.Remove(key);
-                throw new ArgumentException("A prohibited char was used");
-            }
+                // Jeden lookup zamiast TryGetValue + TryAdd — CollectionsMarshal zwraca ref do slotu w słowniku
+                ref Value? slot = ref CollectionsMarshal.GetValueRefOrAddDefault(ValuesList, key, out bool existed);
+                if (existed)
+                    return slot!;
 
-            var newVal = new Value(key, this);
-            slot = newVal;                     // wypełnij slot już istniejący w słowniku
-            GlobalValuesSet.Add(newVal);
-            return newVal;
+                // Nowy klucz — waliduj zakazane znaki dopiero teraz
+                if (_forbiddenCharsArray.Length > 0 && key.IndexOfAny(_forbiddenCharsArray) >= 0)
+                {
+                    // Cofnij dodanie pustego slotu
+                    ValuesList.Remove(key);
+                    throw new ArgumentException("A prohibited char was used");
+                }
+
+                var newVal = new Value(key, this);
+                slot = newVal;                     // wypełnij slot już istniejący w słowniku
+                GlobalValuesSet.Add(newVal);
+                return newVal;
+            }
         }
 
         internal void InsertValue(Value val)
         {
-            if (val == null)
-                throw new ArgumentNullException(nameof(val));
-
-            // 1. globalna unikalność obiektu
-            if (!GlobalValuesSet.Add(val))
-                throw new Exception("You cannot add the same object to this object");
-
-            // 2. unikalność nazwy lokalnie (O(1))
-            if (!ValuesList.TryAdd(val.ValueName, val))
+            lock (_collectionsLock)
             {
-                GlobalValuesSet.Remove(val); // rollback
-                throw new Exception("You cannot have a Value with the same name");
+                if (val == null)
+                    throw new ArgumentNullException(nameof(val));
+
+                // 1. globalna unikalność obiektu
+                if (!GlobalValuesSet.Add(val))
+                    throw new Exception("You cannot add the same object to this object");
+
+                // 2. unikalność nazwy lokalnie (O(1))
+                if (!ValuesList.TryAdd(val.ValueName, val))
+                {
+                    GlobalValuesSet.Remove(val); // rollback
+                    throw new Exception("You cannot have a Value with the same name");
+                }
             }
         }
 
@@ -284,12 +302,14 @@ namespace AdvancedDNV
 
         public Container[] GetContainers()
         {
-            return ContainerList.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToArray();
+            lock (_collectionsLock)
+                return ContainerList.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToArray();
         }
 
         public Value[] GetValues()
         {
-            return ValuesList.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToArray();
+            lock (_collectionsLock)
+                return ValuesList.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToArray();
         }
 
         public void DropContainer()
@@ -305,12 +325,15 @@ namespace AdvancedDNV
             // 3. Odepnij od parenta
             if (_parent != null)
             {
-                _parent.ContainerList.Remove(ContainerName);
+                lock (_parent._collectionsLock)
+                    _parent.ContainerList.Remove(ContainerName);
                 _parent.OnValueUpdated();
             }
 
             // 4. Usuń siebie z globalnego setu (NA KOŃCU, zawsze)
-            GlobalContainerSet.Remove(this);
+            if (_parent != null)
+                lock (_parent._collectionsLock)
+                    GlobalContainerSet.Remove(this);
 
             // 5. Zerwij referencje (pomaga GC)
             _parent = null;
@@ -361,12 +384,19 @@ namespace AdvancedDNV
 
         private static void EstimateRecursive(Container con, ref int size)
         {
-            if (con.ValuesList.Count + con.ContainerList.Count == 0) return;
+            KeyValuePair<string, Value>[] valuesSnapshot;
+            KeyValuePair<string, Container>[] containersSnapshot;
+            lock (con._collectionsLock)
+            {
+                if (con.ValuesList.Count + con.ContainerList.Count == 0) return;
+                valuesSnapshot = con.ValuesList.ToArray();
+                containersSnapshot = con.ContainerList.ToArray();
+            }
 
             // 2 (nameLen ushort) + UTF8 name bytes (ASCII fast-path: 1 byte/char)
             size += 2 + con.ContainerName.Length;
 
-            foreach (var kv in con.ValuesList)
+            foreach (var kv in valuesSnapshot)
             {
                 var v = kv.Value;
                 int valueLen = v.value?.Length ?? 0;
@@ -376,7 +406,7 @@ namespace AdvancedDNV
                 size += 1 + valueLen;
             }
 
-            foreach (var kv in con.ContainerList)
+            foreach (var kv in containersSnapshot)
                 EstimateRecursive(kv.Value, ref size);
 
             size += 2; // end marker
@@ -420,10 +450,18 @@ namespace AdvancedDNV
                     ArrayPool<byte>.Shared.Return(rentedBuf);
                 }
 
-                foreach (var kv in insideValues)
+                KeyValuePair<string, Value>[] valuesSnapshot;
+                KeyValuePair<string, Container>[] containersSnapshot;
+                lock (con._collectionsLock)
+                {
+                    valuesSnapshot = insideValues.ToArray();
+                    containersSnapshot = insideContainers.ToArray();
+                }
+
+                foreach (var kv in valuesSnapshot)
                     kv.Value.GetBytes(indexes, data);
 
-                foreach (var kv in insideContainers)
+                foreach (var kv in containersSnapshot)
                     GoDeeperCompileContainer(kv.Value, indexes, data);
 
                 indexes.WriteByte(0); indexes.WriteByte(0);

@@ -21,15 +21,10 @@ namespace AdvancedDNV
 
         public readonly byte MyVersion = 1; // AdvancedDNV Version
 
-        /// <summary>
-        /// Lista zakazanych znaków specjalnych
-        /// </summary>
-        internal readonly HashSet<char> forbiddenChars = new HashSet<char> { '@', '#', '$', '%', '^', '*', '{', '}', '[', ']', '|', ':', ';', '\'', '"', '<', '>', '?', '/', '\\' };
-
         // Tablica zawierająca te same znaki — jedna instancja na cały proces, bez alokacji per-Container
-        internal static readonly char[] ForbiddenCharsArray = { '@', '#', '$', '%', '^', '*', '{', '}', '[', ']', '|', ':', ';', '\'', '"', '<', '>', '?', '/', '\\' };
+        internal static readonly char[] ForbiddenCharsArray = { '@', '#', '$', '%', '*', ';', '"', '?' };
 
-        internal readonly byte[] MetadataEncryption = new byte[] { 21, 37, 69, 62, 21, 68, 27, 15, 32, 8 , 182};
+        internal readonly byte[] MetadataEncryption = new byte[] { 21, 37, 69, 62, 21, 68, 27, 15, 32, 8, 182 };
         internal readonly byte[] DNVFrameEncryption = new byte[] { 21, 72, 35, 223, 12, 23, 6, 1, 138, 12, 193 };
 
         /// <summary>
