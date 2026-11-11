@@ -26,13 +26,14 @@ namespace AdvancedDNV.Tests
             dnv.Open();
             dnv.main.Value("v").Set(1);
             dnv.Save();
-            dnv.Save();
+            dnv.Save();                 // bez zmian — pomijany
+            dnv.main.Value("v").Set(2);
             dnv.SaveAndClose();
 
             var dnv2 = new DNV(testFilePath);
             dnv2.Open();
-            // 3 saves total: Save, Save, SaveAndClose
-            Assert.Equal(3L, dnv2.Meta.numberOfSaving);
+            // Liczą się tylko zapisy, przed którymi coś się zmieniło: pierwszy Save i SaveAndClose
+            Assert.Equal(2L, dnv2.Meta.numberOfSaving);
             dnv2.Close();
         }
 

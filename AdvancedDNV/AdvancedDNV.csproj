@@ -4,8 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyVersion>2026.0518.0107.0</AssemblyVersion>
-    <FileVersion>2026.0518.0107.0</FileVersion>
+    <AssemblyVersion>2026.1111.1843.0</AssemblyVersion>
+    <FileVersion>2026.1111.1843.0</FileVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -23,6 +23,11 @@
 
   <ItemGroup>
     <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Testy ustawiają czasy (życie klucza, odstęp kopii .bak, ponowienie autozapisu) bez czekania minutami -->
+    <InternalsVisibleTo Include="AdvancedDNV.Tests" />
   </ItemGroup>
 
 </Project>

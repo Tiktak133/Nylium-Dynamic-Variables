@@ -14,4 +14,9 @@
   <ItemGroup>
     <ProjectReference Include="..\AdvancedDNV\AdvancedDNV.csproj" />
   </ItemGroup>
+
+  <!-- Pliki i ramki zapisane starszymi wersjami biblioteki (luty 2026 i wersja wdrożona przed uproszczeniem) -->
+  <ItemGroup>
+    <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

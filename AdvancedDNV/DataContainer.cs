@@ -1,508 +1,344 @@
-﻿using System.Buffers;
+﻿using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Text;
 
 namespace AdvancedDNV
 {
     /// <summary>
-    /// A container object that holds containers and values ​​for the DNV library
+    /// Kontener DNV: nazwane wartości (<see cref="AdvancedDNV.Value"/>) i zagnieżdżone kontenery.
+    /// Całe drzewo (od Main w dół) dzieli jedną blokadę <see cref="SyncRoot"/>, więc można go używać z wielu wątków.
     /// </summary>
     public class Container
     {
-        public string ContainerName { get; private set; }
-        internal HashSet<Container> GlobalContainerSet = new();
-        internal HashSet<Value> GlobalValuesSet = new();
-        internal Dictionary<string, Container> ContainerList;
-        internal Dictionary<string, Value> ValuesList = new();
-        private Container? _parent;
-        internal readonly object _collectionsLock = new object();
+        /// <summary> Najwyższy bit długości nazwy w indeksie: 1 = wartość, 0 = kontener. Para bajtów 0x0000 kończy kontener. </summary>
+        internal const ushort ValueFlag = 0x8000;
 
-        // Zaktualizowno jakąś wartość - potrzebne do auto zapisu
+        public string ContainerName { get; }
+
+        internal readonly Dictionary<string, Container> ContainerList = new();
+        internal readonly Dictionary<string, Value>     ValuesList    = new();
+        internal readonly Lock SyncRoot; // System.Threading.Lock (.NET 9+): lżejszy niż lock(object), też z ponownym wejściem
+        internal readonly int NameByteCount; // długość nazwy w UTF-8 — do wyliczenia rozmiaru przy zapisie
+        private Container? _parent;
+
+        /// <summary> Zmieniono wartość gdziekolwiek w drzewie — zdarzenie podnosi tylko korzeń (z niego korzysta autozapis) </summary>
         public delegate void ValueUpdatedEventHandler();
         public event ValueUpdatedEventHandler? ValueUpdated;
 
-        DNVProperties _myProperties = DNVProperties.Instance;
-        // Statyczna tablica współdzielona — zero alokacji per-Container przez cały czas życia procesu
-        private static readonly char[] _forbiddenCharsArray = DNVProperties.ForbiddenCharsArray;
+        protected internal Container(string name, Container? parent)
+        {
+            NameByteCount = Encoding.UTF8.GetByteCount(name);
+            if (NameByteCount >= 32768)
+                throw new ArgumentException("Container name is too long");
+
+            ContainerName = name;
+            _parent       = parent;
+            SyncRoot      = parent?.SyncRoot ?? new Lock();
+        }
+
+        // ── Odczyt z bajtów ─────────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Creates a container based on the supplied Byte data
+        /// Odczytuje drzewo zapisane przez <see cref="CompileContainer"/>: [4B koniec indeksu][indeks][dane].
+        /// Uszkodzone dane kończą się <see cref="FormatException"/>.
         /// </summary>
-        /// <param name="bytes">Data to create the container tree</param>
-        internal Container(byte[] bytes, Container par, ref int lastIndex, int endIndex)
+        internal static Container Parse(byte[] buffer, int offset, int length, string nameIfEmpty)
         {
-            ushort containerCount = BitConverter.ToUInt16(bytes, lastIndex); lastIndex += 2;
-            ushort ContainerNameCount = containerCount;
+            if (length <= 4)
+                return new Container(nameIfEmpty, null);
 
-            // thisContainer — 4 jako pojemność startowa: większość kontenerów ma niewiele dzieci
-            ContainerList = new Dictionary<string, Container>(4);
-            ContainerName = Encoding.UTF8.GetString(bytes, lastIndex, ContainerNameCount); lastIndex += ContainerNameCount;
+            int indexEnd = BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(offset, 4));
+            if (indexEnd == 4)
+                return new Container(nameIfEmpty, null); // pusty indeks — nic nie zapisano
 
-            this._parent = par;
+            if (indexEnd < 4 || indexEnd > length)
+                throw new FormatException($"Damaged DNV data: index end {indexEnd} outside of {length} bytes.");
 
-            while (StepContainer(bytes, ref lastIndex))
+            try
             {
-                ushort typeCount = BitConverter.ToUInt16(bytes, lastIndex);
-                const ushort ValueFlag = 32768;
-                if (typeCount >= ValueFlag)
-                {
-                    // Value
-                    lastIndex += 2;
-                    int ValueNameCount = typeCount - ValueFlag;
-
-                    string ValueName = Encoding.UTF8.GetString(bytes, lastIndex, ValueNameCount); lastIndex += ValueNameCount;
-                    var newValue = new Value(ValueName, this);
-
-                    byte TypeValue = bytes[lastIndex]; lastIndex += 1;
-                    uint StartIndexValue = BitConverter.ToUInt32(bytes, lastIndex); lastIndex += 4;
-                    uint OccupiedSpaceValue = BitConverter.ToUInt32(bytes, lastIndex) - 1; lastIndex += 4;
-
-                    byte[] newValueData = new byte[OccupiedSpaceValue];
-                    Buffer.BlockCopy(bytes, endIndex + (int)StartIndexValue + 1, newValueData, 0, (int)OccupiedSpaceValue);
-
-                    if (_myProperties.TypeByByte.TryGetValue(TypeValue, out Type? t) && t != null)
-                    {
-                        newValue.type = t;
-                        newValue.value = newValueData;
-                        newValue._valueLen = newValueData.Length;
-
-                        this.InsertValue(newValue);
-                    }
-                    else
-                    {
-                        throw new Exception("Unknown Value type found in DNV data");
-                    }
-                }
-                else if (typeCount > 0)
-                {
-                    //nextContainer
-                    this.InsertContainer(new Container(bytes, this, ref lastIndex, endIndex));
-                }
-                else
-                {
-                    break;
-                }
+                int pos = offset + 4;
+                return new Container(buffer, null, ref pos, offset + indexEnd, offset + length);
+            }
+            catch (Exception e) when (e is ArgumentException or IndexOutOfRangeException or OverflowException)
+            {
+                throw new FormatException("Damaged DNV data: the container structure cannot be read.", e);
             }
         }
 
-        protected internal Container(string name, Container par)
+        /// <summary> Odczyt jednego kontenera (rekurencyjnie z dziećmi). <paramref name="pos"/> wskazuje jego nagłówek w indeksie. </summary>
+        private Container(byte[] bytes, Container? parent, ref int pos, int dataStart, int dataEnd)
         {
-            // Zakoduj tylko wtedy, gdy nie wszystkie znaki są ASCII
-            var nameb = Encoding.UTF8.GetByteCount(name);
-            if (nameb >= 32768)
-                throw new ArgumentException("Container name is too long");
+            _parent  = parent;
+            SyncRoot = parent?.SyncRoot ?? new Lock();
 
-            ContainerList = new Dictionary<string, Container>();
-            ContainerName = name;
-            this._parent = par;
+            NameByteCount = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(pos));  pos += 2;
+            ContainerName = Encoding.UTF8.GetString(bytes, pos, NameByteCount);          pos += NameByteCount;
+
+            while (true)
+            {
+                ushort header = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(pos));
+
+                if (header == 0) // koniec kontenera
+                {
+                    pos += 2;
+                    return;
+                }
+
+                if (header < ValueFlag) // podkontener — sam czyta swój nagłówek
+                {
+                    var child = new Container(bytes, this, ref pos, dataStart, dataEnd);
+                    if (!ContainerList.TryAdd(child.ContainerName, child))
+                        throw new FormatException($"Damaged DNV data: duplicated container \"{child.ContainerName}\".");
+                    continue;
+                }
+
+                pos += 2;
+                int valueNameLength = header - ValueFlag;
+                string valueName = Encoding.UTF8.GetString(bytes, pos, valueNameLength);   pos += valueNameLength;
+                byte   typeCode  = bytes[pos];                                             pos += 1;
+                uint   offset    = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(pos)); pos += 4;
+                uint   size      = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(pos)); pos += 4;
+
+                if (!DNVProperties.IsKnownType(typeCode))
+                    throw new FormatException($"Unknown Value type found in DNV data: {typeCode}");
+
+                // Dane wartości: [1B nagłówka, nieużywany][size - 1 bajtów]
+                long start = (long)dataStart + offset + 1;
+                if (size == 0 || start + size - 1 > dataEnd)
+                    throw new FormatException($"Damaged DNV data: value \"{valueName}\" points outside of the data section.");
+
+                var value = new Value(valueName, valueNameLength, this);
+                value.Load((DNVType)typeCode, bytes, (int)start, (int)size - 1); // bez kopiowania — fragment bufora
+                if (!ValuesList.TryAdd(valueName, value))
+                    throw new FormatException($"Damaged DNV data: duplicated value \"{valueName}\".");
+            }
         }
 
+        // ── Dostęp ──────────────────────────────────────────────────────────────────────────
+
+        /// <summary> Podkontener o podanej nazwie (tworzony, jeśli nie istnieje) </summary>
         public Container this[string key]
         {
             get
             {
-                lock (_collectionsLock)
+                ArgumentNullException.ThrowIfNull(key);
+                lock (SyncRoot)
                 {
-                    if (!this.ContainerList.ContainsKey(key))
-                    {
-                        // Sprawdzanie, czy ciąg znaków zawiera jakiekolwiek z zakazanych znaków
-                        foreach (char c in _forbiddenCharsArray)
-                        {
-                            if (key.Contains(c))
-                            {
-                                throw new Exception("A prohibited char was used: " + c);
-                            }
-                        }
+                    if (ContainerList.TryGetValue(key, out var existing))
+                        return existing;
 
-                        this.InsertContainerLocked(new Container(key, this));
-                    }
-                    return this.ContainerList[key];
+                    int forbidden = key.AsSpan().IndexOfAny(DNVProperties.ForbiddenChars);
+                    if (forbidden >= 0)
+                        throw new Exception("A prohibited char was used: " + key[forbidden]);
+                    if (key.Length == 0)
+                        throw new Exception("Container name cannot be empty"); // pusta nazwa zlałaby się ze znacznikiem końca
+
+                    var created = new Container(key, this);
+                    ContainerList.Add(key, created);
+                    return created;
                 }
             }
         }
 
-        bool StepContainer(byte[] bytes, ref int lastIndex)
-        {
-            if (bytes[lastIndex] == 0 && bytes[lastIndex + 1] == 0)
-            {
-                lastIndex += 2;
-                return false;
-            }
-            else
-            {
-                return true;
-            }
-        }
-
-        internal void ErrorLog(string text)
-        {
-            return;
-        }
-
-        internal void InsertContainer(Container con)
-        {
-            lock (_collectionsLock)
-            {
-                InsertContainerLocked(con);
-            }
-        }
-
-        private void InsertContainerLocked(Container con)
-        {
-            if (con == null)
-                throw new ArgumentNullException(nameof(con));
-
-            // 1. Sprawdzenie zagnieżdżenia (O(1))
-            if (!GlobalContainerSet.Add(con))
-                throw new Exception("You cannot add the same object to this object");
-
-            // 2. Sprawdzenie unikalności nazwy (O(1))
-            if (!ContainerList.TryAdd(con.ContainerName, con))
-            {
-                GlobalContainerSet.Remove(con); // rollback
-                throw new Exception("You cannot have a Container with the same name");
-            }
-
-            // 3. Podpięcie do wspólnej listy
-            con.GlobalContainerSet = this.GlobalContainerSet;
-        }
-
-
-        /// <summary>
-        /// An object holding values ​​for the DNV library
-        /// </summary>
-        /// <param name="key">Name of Value object</param>
+        /// <summary> Wartość o podanej nazwie (tworzona, jeśli nie istnieje) </summary>
         public Value Value(string key)
         {
-            if (key == null) throw new ArgumentNullException(nameof(key));
-
-            lock (_collectionsLock)
+            ArgumentNullException.ThrowIfNull(key);
+            lock (SyncRoot)
             {
-                // Jeden lookup zamiast TryGetValue + TryAdd — CollectionsMarshal zwraca ref do slotu w słowniku
-                ref Value? slot = ref CollectionsMarshal.GetValueRefOrAddDefault(ValuesList, key, out bool existed);
-                if (existed)
+                // Jedno przeszukanie słownika zamiast dwóch (TryGetValue + Add) — to najczęstsza operacja przy budowie ramek
+                ref Value? slot = ref CollectionsMarshal.GetValueRefOrAddDefault(ValuesList, key, out bool exists);
+                if (exists)
                     return slot!;
 
-                // Nowy klucz — waliduj zakazane znaki dopiero teraz
-                if (_forbiddenCharsArray.Length > 0 && key.IndexOfAny(_forbiddenCharsArray) >= 0)
+                try
                 {
-                    // Cofnij dodanie pustego slotu
-                    ValuesList.Remove(key);
-                    throw new ArgumentException("A prohibited char was used");
+                    if (key.AsSpan().IndexOfAny(DNVProperties.ForbiddenChars) >= 0)
+                        throw new ArgumentException("A prohibited char was used");
+                    return slot = new Value(key, this);
                 }
-
-                var newVal = new Value(key, this);
-                slot = newVal;                     // wypełnij slot już istniejący w słowniku
-                GlobalValuesSet.Add(newVal);
-                return newVal;
+                catch
+                {
+                    ValuesList.Remove(key); // wycofujemy pusty wpis dodany przez GetValueRefOrAddDefault
+                    throw;
+                }
             }
         }
 
-        internal void InsertValue(Value val)
+        public Container[] GetContainers()
         {
-            lock (_collectionsLock)
-            {
-                if (val == null)
-                    throw new ArgumentNullException(nameof(val));
-
-                // 1. globalna unikalność obiektu
-                if (!GlobalValuesSet.Add(val))
-                    throw new Exception("You cannot add the same object to this object");
-
-                // 2. unikalność nazwy lokalnie (O(1))
-                if (!ValuesList.TryAdd(val.ValueName, val))
-                {
-                    GlobalValuesSet.Remove(val); // rollback
-                    throw new Exception("You cannot have a Value with the same name");
-                }
-            }
+            lock (SyncRoot)
+                return ContainerList.OrderBy(kv => kv.Key).Select(kv => kv.Value).ToArray();
         }
 
-        /// <summary>
-        /// Deprecated data placement, use newer Value.Set(value) function
-        /// </summary>
-        /// <remarks>
-        /// <b>Migration note:</b> Use <c>container.Value(name).Set(value)</c> directly.
-        /// </remarks>
-        [Obsolete("Use container.Value(name).Set(value) instead. This overload uses DLR dispatch via dynamic.")]
+        public Value[] GetValues()
+        {
+            lock (SyncRoot)
+                return ValuesList.OrderBy(kv => kv.Key).Select(kv => kv.Value).ToArray();
+        }
+
+        // ── Skróty (używane w wielu miejscach launchera, API i serwera) ─────────────────────
+
+        /// <summary> To samo co <c>Value(name).Set(value)</c> </summary>
         public Container SetValue(string name, dynamic? value)
         {
-            this.Value(name).Set((object?)value);
+            Value(name).Set((object?)value);
             return this;
         }
 
         public Container SetValues(params (string name, object? value)[] values)
         {
-            HashSet<string> uniqueNames = new HashSet<string>();
-
-            foreach (var item in values)
+            var uniqueNames = new HashSet<string>();
+            foreach (var (name, value) in values)
             {
-                if (!uniqueNames.Add(item.name))
-                    throw new ArgumentException($"A parameter named '{item.name}' was specified more than once.");
-
-                this.Value(item.name).Set(item.value);
+                if (!uniqueNames.Add(name))
+                    throw new ArgumentException($"A parameter named '{name}' was specified more than once.");
+                Value(name).Set(value);
             }
             return this;
         }
 
-        /// <summary>
-        /// Deprecated data retrieval, use newer Value.Get&lt;T&gt;() function
-        /// </summary>
-        /// <remarks>
-        /// <b>Migration note:</b> Call <c>objectV.Get&lt;T&gt;()</c> directly.
-        /// </remarks>
-        [Obsolete("Call objectV.Get<T>() directly instead.")]
-        public T GetValue<T>(Value objectV)
-        {
-            return objectV.Get<T>();
-        }
+        /// <summary> To samo co <c>Value(name).Get()</c> </summary>
+        public dynamic? GetValue(string name) => Value(name).Get();
 
-        /// <summary>
-        /// Deprecated data retrieval, use newer Value.Get(defaultOut) function
-        /// </summary>
-        /// <remarks>
-        /// <b>Migration note:</b> Call <c>objectV.Get&lt;T&gt;(defaultOut)</c> directly.
-        /// </remarks>
-        [Obsolete("Call objectV.Get<T>(defaultOut) directly instead.")]
-        public dynamic GetValue(Value objectV, dynamic defaultOut)
-        {
-            return objectV.Get(defaultOut);
-        }
+        /// <summary> To samo co <c>Value(name).Get(defaultOut)</c> </summary>
+        public dynamic? GetValue(string name, dynamic? defaultOut) => Value(name).Get(defaultOut);
 
-        /// <summary>
-        /// Deprecated data retrieval, use newer Value.Get() function
-        /// </summary>
-        /// <remarks>
-        /// <b>Migration note:</b> Call <c>objectV.Get&lt;T&gt;()</c> directly.
-        /// </remarks>
-        [Obsolete("Call objectV.Get<T>() directly instead.")]
-        public dynamic? GetValue(Value objectV)
-        {
-            return objectV.Get();
-        }
+        public T GetValue<T>(Value objectV) => objectV.Get<T>();
+        public dynamic GetValue(Value objectV, dynamic defaultOut) => objectV.Get(defaultOut);
+        public dynamic? GetValue(Value objectV) => objectV.Get();
 
-        /// <remarks>
-        /// <b>Migration note:</b> Use <c>container.Value(name).Get&lt;T&gt;()</c> instead.
-        /// </remarks>
-        [Obsolete("Use container.Value(name).Get<T>() instead.")]
-        public dynamic? GetValue(string name)
-        {
-            return this.Value(name).Get();
-        }
+        // ── Usuwanie ────────────────────────────────────────────────────────────────────────
 
-        /// <remarks>
-        /// <b>Migration note:</b> Use <c>container.Value(name).Get&lt;T&gt;(defaultOut)</c> instead.
-        /// </remarks>
-        [Obsolete("Use container.Value(name).Get<T>(defaultOut) instead.")]
-        public dynamic? GetValue(string name, dynamic? defaultOut)
-        {
-            return this.Value(name).Get(defaultOut);
-        }
-
-
-        public Container[] GetContainers()
-        {
-            lock (_collectionsLock)
-                return ContainerList.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToArray();
-        }
-
-        public Value[] GetValues()
-        {
-            lock (_collectionsLock)
-                return ValuesList.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value).ToArray();
-        }
-
+        /// <summary> Usuwa kontener z rodzica (dla Main — czyści całą zawartość) </summary>
         public void DropContainer()
         {
-            // 1. Usuń wartości
-            foreach (var value in GetValues())
-                value.Drop();
-
-            // 2. Usuń dzieci (rekurencyjnie)
-            foreach (var child in GetContainers())
-                child.DropContainer();
-
-            // 3. Odepnij od parenta
-            if (_parent != null)
+            Container? parent;
+            lock (SyncRoot)
             {
-                lock (_parent._collectionsLock)
-                    _parent.ContainerList.Remove(ContainerName);
-                _parent.OnValueUpdated();
+                parent = _parent;
+                if (parent == null)
+                {
+                    ValuesList.Clear();
+                    ContainerList.Clear();
+                }
+                else if (parent.ContainerList.TryGetValue(ContainerName, out var registered) && registered == this)
+                {
+                    parent.ContainerList.Remove(ContainerName);
+                }
+                _parent = null;
             }
-
-            // 4. Usuń siebie z globalnego setu (NA KOŃCU, zawsze)
-            if (_parent != null)
-                lock (_parent._collectionsLock)
-                    GlobalContainerSet.Remove(this);
-
-            // 5. Zerwij referencje (pomaga GC)
-            _parent = null;
+            (parent ?? this).OnValueUpdated();
         }
 
+        internal void OnValueUpdated()
+        {
+            Container root = this;
+            while (root._parent is { } p)
+                root = p;
+            root.ValueUpdated?.Invoke();
+        }
 
-        /// <summary>
-        /// Kompiluje kontener aby wykonać eksport danych
-        /// </summary>
-        /// <returns></returns>
-        /// <exception cref="Exception">Zbyt dużo danych kontenera</exception>
+        // ── Zapis do bajtów ─────────────────────────────────────────────────────────────────
+
+        // Serializacja całego drzewa: [4B koniec indeksu][indeks][dane]. Puste kontenery i wartości są pomijane.
+        // Dwa przejścia pod jedną blokadą: najpierw dokładny rozmiar, potem zapis wprost do docelowej tablicy —
+        // bez MemoryStream, bez pośrednich kopii i bez osobnych tablic na nazwy.
+
         protected internal byte[] CompileContainer()
         {
-            // Szacujemy pojemność bufora zanim zaczniemy pisać — eliminuje realokacje MemoryStream
-            int estimatedSize = EstimateCompileSize(this);
+            lock (SyncRoot) // spójna migawka całego drzewa
+            {
+                int size = CompiledSize(out int indexSize);
+                byte[] result = GC.AllocateUninitializedArray<byte>(size); // CompileInto zapisuje każdy bajt (sprawdza to)
+                CompileInto(result, indexSize);
+                return result;
+            }
+        }
 
-            using var indexes = new System.IO.MemoryStream(estimatedSize);
-            using var data    = new System.IO.MemoryStream(estimatedSize);
+        /// <summary> Rozmiar po serializacji. Wywoływać pod blokadą <see cref="SyncRoot"/>, razem z <see cref="CompileInto"/>. </summary>
+        internal int CompiledSize(out int indexSize)
+        {
+            long index = 0, data = 0;
+            Measure(this, ref index, ref data);
 
-            GoDeeperCompileContainer(this, indexes, data);
-
-            long totalLen = indexes.Length + data.Length + 4;
-            if (totalLen >= int.MaxValue)
+            long total = 4 + index + data;
+            if (total >= int.MaxValue)
                 throw new Exception("DNV is too long");
 
-            // Wynik: 4 bajty rozmiaru indeksu | indeks | dane
-            byte[] result = new byte[totalLen];
-            int offset = 0;
-
-            WriteInt32ToBuffer(result, offset, (int)(indexes.Length + 4)); offset += 4;
-
-            Buffer.BlockCopy(indexes.GetBuffer(), 0, result, offset, (int)indexes.Length); offset += (int)indexes.Length;
-            Buffer.BlockCopy(data.GetBuffer(),    0, result, offset, (int)data.Length);
-
-            return result;
+            indexSize = (int)index;
+            return (int)total;
         }
 
-        /// <summary>
-        /// Szybki szacunek rozmiaru skompilowanego kontenera — bez alokacji, bez pisania bajtów.
-        /// Przybliżenie: 2 (nameLen) + UTF8(name) + 9 (per-value index) + value.Length + 1 (header) + 2 (end marker)
-        /// </summary>
-        private static int EstimateCompileSize(Container con)
+        /// <summary> Zapis do bufora o długości z <see cref="CompiledSize"/>. Wywoływać pod tą samą blokadą. </summary>
+        internal void CompileInto(Span<byte> destination, int indexSize)
         {
-            int size = 0;
-            EstimateRecursive(con, ref size);
-            return Math.Max(size, 64);
+            BinaryPrimitives.WriteInt32LittleEndian(destination, 4 + indexSize);
+            Span<byte> index = destination.Slice(4, indexSize);
+            Span<byte> data  = destination[(4 + indexSize)..];
+
+            int indexPos = 0, dataPos = 0;
+            Write(this, index, ref indexPos, data, ref dataPos);
+
+            // Bufor bywa niezainicjowany — gdyby rozmiary się rozjechały, poszłyby w świat przypadkowe bajty z pamięci
+            if (indexPos != index.Length || dataPos != data.Length)
+                throw new InvalidOperationException($"DNV serialization size mismatch (index {indexPos}/{index.Length}, data {dataPos}/{data.Length}).");
         }
 
-        private static void EstimateRecursive(Container con, ref int size)
+        private static void Measure(Container con, ref long index, ref long data)
         {
-            KeyValuePair<string, Value>[] valuesSnapshot;
-            KeyValuePair<string, Container>[] containersSnapshot;
-            lock (con._collectionsLock)
+            if (con.ValuesList.Count + con.ContainerList.Count == 0)
+                return;
+
+            index += 2 + con.NameByteCount + 2; // nagłówek z nazwą + znacznik końca
+            foreach (var value in con.ValuesList.Values)
             {
-                if (con.ValuesList.Count + con.ContainerList.Count == 0) return;
-                valuesSnapshot = con.ValuesList.ToArray();
-                containersSnapshot = con.ContainerList.ToArray();
-            }
-
-            // 2 (nameLen ushort) + UTF8 name bytes (ASCII fast-path: 1 byte/char)
-            size += 2 + con.ContainerName.Length;
-
-            foreach (var kv in valuesSnapshot)
-            {
-                var v = kv.Value;
-                int valueLen = v.value?.Length ?? 0;
-                // index entry: 2 (flag+nameLen) + nameLen + 1 (type) + 4 (offset) + 4 (size) = 11 + nameLen
-                size += 11 + kv.Key.Length;
-                // data entry: 1 (header byte) + valueLen
-                size += 1 + valueLen;
-            }
-
-            foreach (var kv in containersSnapshot)
-                EstimateRecursive(kv.Value, ref size);
-
-            size += 2; // end marker
-        }
-
-        private static void WriteInt32ToBuffer(byte[] buf, int offset, int value)
-        {
-            buf[offset]     = (byte)value;
-            buf[offset + 1] = (byte)(value >> 8);
-            buf[offset + 2] = (byte)(value >> 16);
-            buf[offset + 3] = (byte)(value >> 24);
-        }
-
-        protected private void GoDeeperCompileContainer(Container con, System.IO.MemoryStream indexes, System.IO.MemoryStream data)
-        {
-            var insideValues = con.ValuesList;
-            var insideContainers = con.ContainerList;
-
-            if (insideValues.Count + insideContainers.Count > 0)
-            {
-                string name = con.ContainerName;
-                int maxBytes = Encoding.UTF8.GetMaxByteCount(name.Length);
-                // ArrayPool: brak alokacji na stercie dla nazwy kontenera podczas serializacji
-                byte[] rentedBuf = ArrayPool<byte>.Shared.Rent(maxBytes);
-                int nameLength;
-                try
+                if (value.IsWritten)
                 {
-                    nameLength = Encoding.UTF8.GetBytes(name, 0, name.Length, rentedBuf, 0);
-                    if (nameLength >= 32768)
-                        throw new ArgumentException("Container name is too long");
-
-                    // stackalloc: 2 bajty nagłówka nazwy — zero alokacji na stercie
-                    Span<byte> nameLenBuf = stackalloc byte[2];
-                    nameLenBuf[0] = (byte)nameLength;
-                    nameLenBuf[1] = (byte)(nameLength >> 8);
-                    indexes.Write(nameLenBuf);
-                    indexes.Write(rentedBuf, 0, nameLength);
+                    index += value.IndexSize;
+                    data  += value.DataSize;
                 }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(rentedBuf);
-                }
-
-                KeyValuePair<string, Value>[] valuesSnapshot;
-                KeyValuePair<string, Container>[] containersSnapshot;
-                lock (con._collectionsLock)
-                {
-                    valuesSnapshot = insideValues.ToArray();
-                    containersSnapshot = insideContainers.ToArray();
-                }
-
-                foreach (var kv in valuesSnapshot)
-                    kv.Value.GetBytes(indexes, data);
-
-                foreach (var kv in containersSnapshot)
-                    GoDeeperCompileContainer(kv.Value, indexes, data);
-
-                indexes.WriteByte(0); indexes.WriteByte(0);
             }
+            foreach (var child in con.ContainerList.Values)
+                Measure(child, ref index, ref data);
         }
 
-        /// <summary>
-        /// Gdy zaktualizowano zawartość Value
-        /// </summary>
-        /// <param name="InvokeValue">Obiekt Value</param>
-        internal virtual void OnValueUpdated()
+        private static void Write(Container con, Span<byte> index, ref int indexPos, Span<byte> data, ref int dataPos)
         {
-            if(_parent != null)  // Jeżeli Container posiada rodzica, przekaż event wyżej
-                _parent.OnValueUpdated();
-            else                // W przeciwnym razie (to jest Container Main), więc event zostaje wywołany dla niego
-                ValueUpdated?.Invoke(); // Wywołanie eventu
+            if (con.ValuesList.Count + con.ContainerList.Count == 0)
+                return;
+
+            BinaryPrimitives.WriteUInt16LittleEndian(index[indexPos..], (ushort)con.NameByteCount);
+            indexPos += 2;
+            indexPos += Encoding.UTF8.GetBytes(con.ContainerName, index[indexPos..]);
+
+            foreach (var value in con.ValuesList.Values)
+                if (value.IsWritten)
+                    value.WriteTo(index, ref indexPos, data, ref dataPos);
+            foreach (var child in con.ContainerList.Values)
+                Write(child, index, ref indexPos, data, ref dataPos);
+
+            index[indexPos++] = 0; // koniec kontenera
+            index[indexPos++] = 0;
         }
 
-        /// <summary>
-        /// Wyodrębnij wybrany Container do osobnej instancji DNVFrame
-        /// </summary>
+        // ── Wyodrębnianie ───────────────────────────────────────────────────────────────────
+
+        /// <summary> Kopia tego kontenera (z całą zawartością) jako Main nowej ramki </summary>
         public DNVFrame ExtractToFrame()
         {
-            var ExportedFrame = new DNVFrame();
-
-            ImportToFrame(ExportedFrame.main, this);
-
-            return ExportedFrame;
+            var frame = new DNVFrame();
+            lock (SyncRoot)
+                CopyTree(this, frame.main);
+            return frame;
         }
 
-        private void ImportToFrame(Container ActualFrameContainer, Container containerToImport)
+        private static void CopyTree(Container from, Container to)
         {
-            foreach (var valueI in containerToImport.GetValues())
-            {
-                ActualFrameContainer.Value(valueI.ValueName).Set(valueI.Get());
-            }
-
-            foreach (var containerI in containerToImport.GetContainers())
-            {
-                ImportToFrame(ActualFrameContainer[containerI.ContainerName], containerI);
-            }
+            foreach (var value in from.ValuesList.Values)
+                value.CopyTo(to.Value(value.ValueName));
+            foreach (var child in from.ContainerList.Values)
+                CopyTree(child, to[child.ContainerName]);
         }
     }
 }

@@ -4,15 +4,28 @@
     {
         // ── Color Helpers ─────────────────────────────────────────────────────────────────
 
+        // Na Androidzie/iOS kolory konsoli nie istnieją (Console.ForegroundColor rzuca PlatformNotSupportedException),
+        // a wyjście konsoli trafia do logów systemu — tam wypisujemy to samo, tylko bez kolorów.
+        private static readonly bool ColorsSupported =
+            !(OperatingSystem.IsAndroid() || OperatingSystem.IsIOS() || OperatingSystem.IsTvOS() || OperatingSystem.IsBrowser());
+
+        private static ConsoleColor GetColor() => ColorsSupported ? Console.ForegroundColor : ConsoleColor.Gray;
+
+        private static void SetColor(ConsoleColor color)
+        {
+            if (ColorsSupported)
+                Console.ForegroundColor = color;
+        }
+
         private static void Cw(ConsoleColor color, string text)
         {
-            Console.ForegroundColor = color;
+            SetColor(color);
             Console.Write(text);
         }
 
         private static void Cwl(ConsoleColor color, string text)
         {
-            Console.ForegroundColor = color;
+            SetColor(color);
             Console.WriteLine(text);
         }
 
@@ -20,10 +33,11 @@
 
         public static void ReadMetaData(DNV dnv)
         {
-            ConsoleColor saved = Console.ForegroundColor;
-            if (dnv.Meta == null)
+            ConsoleColor saved = GetColor();
+            if (!dnv.isOpened)
             {
-                Cwl(ConsoleColor.Red, "[!] no meta data");
+                Cwl(ConsoleColor.Red, "[!] DNV file is not opened - no meta data");
+                SetColor(saved);
                 return;
             }
 
@@ -56,15 +70,15 @@
             foreach (var row in rows)
                 PrintMetaRow(row.Label, row.Value, innerWidth);
             Cwl(ConsoleColor.Cyan, bottom);
-            Console.ForegroundColor = saved;
+            SetColor(saved);
         }
 
         public static void ContainersAll(Container con)
         {
-            ConsoleColor saved = Console.ForegroundColor;
+            ConsoleColor saved = GetColor();
             Console.WriteLine();
             PrintContainer(con, "", "");
-            Console.ForegroundColor = saved;
+            SetColor(saved);
         }
 
         /// <summary>
@@ -72,7 +86,7 @@
         /// </summary>
         public static void ContainerValues(Container con)
         {
-            ConsoleColor saved = Console.ForegroundColor;
+            ConsoleColor saved = GetColor();
             Value[] values = con.GetValues();
 
             Cw(ConsoleColor.White, "┌─ ");
@@ -81,7 +95,7 @@
             for (int i = 0; i < values.Length; i++)
                 PrintValueLine(values[i], "", i == values.Length - 1 ? "└── " : "├── ");
 
-            Console.ForegroundColor = saved;
+            SetColor(saved);
         }
 
         /// <summary>
@@ -89,9 +103,9 @@
         /// </summary>
         public static void ContainersOnlyStructure(Container con, string prefix = "")
         {
-            ConsoleColor saved = Console.ForegroundColor;
+            ConsoleColor saved = GetColor();
             PrintStructure(con, prefix, "");
-            Console.ForegroundColor = saved;
+            SetColor(saved);
         }
 
         // ── Private Methods ────────────────────────────────────────────────────────────────
