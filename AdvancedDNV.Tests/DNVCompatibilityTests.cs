@@ -85,31 +85,25 @@ namespace AdvancedDNV.Tests
         }
 
         [Fact]
-        public void OpenOldCSharp48FileFormat_ConsiderableDataBlock()
+        public void OpenOldCSharp48FileFormat()
         {
-            TestOpeningFile(@"C:\Users\kamil\source\repos\Nylium Dynamic Variables\AdvancedDNV\discordVideo.dnv");
+            TestOpeningFile(Path.Combine(AppContext.BaseDirectory, "Fixtures", "menu_sets.dnv"));
         }
 
-        [Fact]
-        public void OpenOldCSharp48FileFormat_SmallDataBlock()
-        {
-            TestOpeningFile(@"C:\Users\kamil\source\repos\Nylium Dynamic Variables\AdvancedDNV\update.dnv");
-        }
 
         private void TestOpeningFile(string fileName)
         {
             Assert.True(File.Exists(fileName), $"Test file not found: {fileName}");
 
-            var tempFile = @"temp_dataBlock.dnv";
-            if (File.Exists(tempFile))
-                File.Delete(tempFile);
+            // Pracujemy na kopii — test zapisuje plik, a wzorzec ma zostać nietknięty
+            var tempFile = Path.Combine(Path.GetTempPath(), $"dnv_open_{Guid.NewGuid():N}.dnv");
             File.Copy(fileName, tempFile);
 
             var swTotal = Stopwatch.StartNew();
             var sw = new Stopwatch();
 
             sw.Restart();
-            var dnv2 = new DNV(fileName);
+            var dnv2 = new DNV(tempFile);
             sw.Stop();
             _output.WriteLine($"Ctor (reopen): {sw.Elapsed.TotalMilliseconds:F1} ms");
 

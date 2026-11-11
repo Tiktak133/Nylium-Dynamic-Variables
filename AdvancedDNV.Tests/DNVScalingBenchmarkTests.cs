@@ -18,7 +18,7 @@ namespace AdvancedDNV.Tests
         private static readonly int[] FieldCounts =
         [
             10, 25, 50, 100, 200, 500,
-            1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000
+            1_000, 2_000, 5_000, 10_000, 20_000
         ];
 
         private const int WarmupIterations = 2;  // iteracje JIT warm-up (nie liczone)

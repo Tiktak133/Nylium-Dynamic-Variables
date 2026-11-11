@@ -1,238 +1,97 @@
-﻿using System;
-using System.Collections;
-using System.IO;
-using System.Numerics;
+﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace AdvancedDNV
 {
-    internal class DNVEncryption
+    /// <summary>
+    /// Szyfrowanie plików .dnv hasłem (AES-256-CBC) oraz proste zaciemnianie XOR metadanych i ramek.
+    /// </summary>
+    internal static class DNVEncryption
     {
-        // ThreadStatic: każdy wątek ma własny bufor — zero alokacji po pierwszym wywołaniu per wątek
-        [ThreadStatic] private static byte[]? _expandedBuf;
-        private DateTime lastAttemptTime = DateTime.MinValue;
-
-        // Funkcja do generowania klucza AES z hasła
-        internal (byte[] key, byte[] iv) GenerateAESKeyFromPassword(string password, byte[] salt, SecurityLevel securityLevel)
+        internal enum SecurityLevel
         {
-            return iGenerateAESKeyFromPassword(password, salt, (int)securityLevel);
-        }
-        internal (byte[] key, byte[] iv) GenerateAESKeyFromPassword(string password, byte[] salt, int securityLevel)
-        {
-            return iGenerateAESKeyFromPassword(password, salt, securityLevel);
+            Fast    = 1, // jeden SHA-256
+            Optimal = 2, // PBKDF2-SHA256, 5 000 iteracji
+            Best    = 3, // PBKDF2-SHA256, 100 000 iteracji
         }
 
-        private (byte[] key, byte[] iv) iGenerateAESKeyFromPassword(string password, byte[] salt, int securityLevel)
+        /// <summary> Klucz AES (32 B) i IV (16 B) wyprowadzone z hasła i soli </summary>
+        internal static (byte[] key, byte[] iv) GenerateAESKeyFromPassword(string password, byte[] salt, int securityLevel)
         {
-            if (securityLevel >= 2) // Standardowe i Najlepsze szyfrowanie
+            if (securityLevel >= (int)SecurityLevel.Optimal)
             {
-                using (var keyDerivation = new Rfc2898DeriveBytes(password, salt, securityLevel == 2 ? 5000 : 100000, HashAlgorithmName.SHA256))
-                {
-                    byte[] key = keyDerivation.GetBytes(32);  // 256-bitowy klucz
-                    byte[] iv = keyDerivation.GetBytes(16);   // 128-bitowy IV
-                    return (key, iv);
-                }
-            }
-            else // Najszybsze szyfrowanie
-            {
-                using (SHA256 sha256 = SHA256.Create())
-                {
-                    // Łączenie hasła z solą
-                    byte[] passwordBytes = System.Text.Encoding.UTF8.GetBytes(password);
-                    byte[] saltedPassword = new byte[passwordBytes.Length + salt.Length];
-                    Buffer.BlockCopy(passwordBytes, 0, saltedPassword, 0, passwordBytes.Length);
-                    Buffer.BlockCopy(salt, 0, saltedPassword, passwordBytes.Length, salt.Length);
-
-                    // Obliczenie skrótu z hasła + soli
-                    byte[] hash = sha256.ComputeHash(saltedPassword);
-
-                    // Pierwsze 32 bajty jako klucz AES
-                    byte[] key = new byte[32];
-                    Array.Copy(hash, key, 32);
-
-                    // Pierwsze 16 bajtów jako IV
-                    byte[] iv = new byte[16];
-                    Array.Copy(hash, iv, 16);
-
-                    return (key, iv);
-                }
-            }
-        }
-
-        // Szyfrowanie danych przy użyciu AES i hasła
-        internal byte[] EncryptData(byte[] dataToEncrypt, byte[] key, byte[] iv, byte[] salt)
-        {
-            using (Aes aes = Aes.Create())
-            {
-                aes.Key = key;
-                aes.IV = iv;
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-
-                using (var ms = new MemoryStream())
-                using (var cryptoStream = new CryptoStream(ms, aes.CreateEncryptor(), CryptoStreamMode.Write))
-                {
-                    cryptoStream.Write(dataToEncrypt, 0, dataToEncrypt.Length);
-                    cryptoStream.FlushFinalBlock();
-                    return ms.ToArray();
-                }
-            }
-        }
-
-        // Deszyfrowanie danych przy użyciu AES i hasła
-        internal byte[] DecryptData(byte[] encryptedData, byte[] key, byte[] iv, byte[] salt)
-        {
-            using (Aes aes = Aes.Create())
-            {
-                aes.Key = key;
-                aes.IV = iv;
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-
-                using (var ms = new MemoryStream(encryptedData))
-                using (var cryptoStream = new CryptoStream(ms, aes.CreateDecryptor(), CryptoStreamMode.Read))
-                using (var resultStream = new MemoryStream())
-                {
-                    cryptoStream.CopyTo(resultStream);
-                    return resultStream.ToArray();
-                }
-            }
-        }
-
-        // Generowanie losowej soli dla bezpieczeństwa
-        internal byte[] RandomSalt(int length = 16) 
-        {
-            byte[] salt = new byte[length];
-            using (var rng = RandomNumberGenerator.Create())
-            {
-                rng.GetBytes(salt);
-                return salt;
-            }          
-        }
-
-        // Funkcja generująca blok kontrolny przy użyciu hasła i soli
-        internal byte[] GenerateControlBlock(byte[] key, byte[] iv, byte[] salt)
-        {
-            // Losowy kontrolny blok danych (może być krótki, np. 16 bajtów)
-            byte[] controlData = new byte[16];
-            using (var rng = RandomNumberGenerator.Create())
-            {
-                rng.GetBytes(controlData);
+                int iterations = securityLevel == (int)SecurityLevel.Optimal ? 5000 : 100000;
+                byte[] derived = Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32 + 16);
+                return (derived[..32], derived[32..]);
             }
 
-            // Szyfrowanie bloku kontrolnego
-            using (Aes aes = Aes.Create())
-            {
-                aes.Key = key;
-                aes.IV = iv;
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-
-                using (var ms = new MemoryStream())
-                using (var cryptoStream = new CryptoStream(ms, aes.CreateEncryptor(), CryptoStreamMode.Write))
-                {
-                    cryptoStream.Write(controlData, 0, controlData.Length);
-                    cryptoStream.FlushFinalBlock();
-                    return ms.ToArray(); // Zwracamy zaszyfrowany blok kontrolny
-                }
-            }
+            // Fast: SHA-256(hasło + sól); klucz to cały skrót, IV to jego pierwsze 16 bajtów
+            byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
+            byte[] hash = SHA256.HashData([.. passwordBytes, .. salt]);
+            return (hash, hash[..16]);
         }
 
-        // Funkcja weryfikująca poprawność hasła przez porównanie bloku kontrolnego
-        internal bool VerifyControlBlock(byte[] encryptedControlBlock, byte[] key, byte[] iv, byte[] salt)
+        internal static byte[] EncryptData(byte[] data, byte[] key, byte[] iv)
         {
-            // Sprawdzenie, czy minęła co najmniej 100 ms od ostatniego sprawdzenia
-            if ((DateTime.Now - lastAttemptTime).TotalMilliseconds < 100)
+            using var aes = Aes.Create();
+            aes.Key = key;
+            return aes.EncryptCbc(data, iv, PaddingMode.PKCS7);
+        }
+
+        /// <exception cref="CryptographicException">Zły klucz lub uszkodzone dane</exception>
+        internal static byte[] DecryptData(byte[] data, byte[] key, byte[] iv)
+        {
+            using var aes = Aes.Create();
+            aes.Key = key;
+            return aes.DecryptCbc(data, iv, PaddingMode.PKCS7);
+        }
+
+        internal static byte[] RandomSalt(int length = 16) => RandomNumberGenerator.GetBytes(length);
+
+        /// <summary> Zaszyfrowany losowy blok — pozwala sprawdzić hasło przed odszyfrowaniem całego pliku </summary>
+        internal static byte[] GenerateControlBlock(byte[] key, byte[] iv) => EncryptData(RandomNumberGenerator.GetBytes(16), key, iv);
+
+        /// <summary> Czy klucz pasuje do bloku kontrolnego (pełne odszyfrowanie razem ze sprawdzeniem dopełnienia) </summary>
+        internal static bool VerifyControlBlock(byte[] controlBlock, byte[] key, byte[] iv)
+        {
+            try
             {
-                //Można wykonywać co 100ms, w przeciwnym razie zwróci False
+                return DecryptData(controlBlock, key, iv).Length == 16;
+            }
+            catch (CryptographicException)
+            {
                 return false;
             }
-
-            // Aktualizacja czasu ostatniego sprawdzenia
-            lastAttemptTime = DateTime.Now;
-
-            using (Aes aes = Aes.Create())
-            {
-                aes.Key = key;
-                aes.IV = iv;
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-
-                // Odszyfrowanie bloku kontrolnego do porównania
-                byte[] decryptedControlData = new byte[16];
-                using (var ms = new MemoryStream(encryptedControlBlock))
-                using (var cryptoStream = new CryptoStream(ms, aes.CreateDecryptor(), CryptoStreamMode.Read))
-                {
-                    try
-                    {
-                        cryptoStream.Read(decryptedControlData, 0, decryptedControlData.Length);
-
-                        //Hasło poprawne
-                        return true;
-                    }
-                    catch
-                    {
-                        //Niepoprawne hasło lub uszkodzone dane
-                        return false;
-                    }
-                }
-            }
         }
 
-
-        // Szyfrowanie/deszyfrowanie metodą XOR bez alokacji dodatkowej pamięci - NIE STOSOWAĆ DO WAŻNYCH DANYCH
+        /// <summary>
+        /// Zaciemnianie XOR w miejscu (ta sama operacja szyfruje i odszyfrowuje). NIE STOSOWAĆ DO WAŻNYCH DANYCH.
+        /// Wynik jest identyczny jak w pętli <c>data[i] ^= key[i % key.Length]</c>, niezależnie od procesora.
+        /// </summary>
         internal static void SimpleEncryptInPlace(Span<byte> data, byte[] key)
         {
-            if (data.IsEmpty) return;
+            // Klucz powtórzony tyle razy, by dało się go przyłożyć całymi wektorami SIMD (bez dzielenia modulo w pętli).
+            // Długość wzorca jest wielokrotnością długości klucza, więc każdy kolejny blok zaczyna się od key[0].
+            int patternLength = Vector<byte>.Count * key.Length;
+            Span<byte> pattern = patternLength <= 1024 ? stackalloc byte[patternLength] : new byte[patternLength];
+            for (int i = 0; i < pattern.Length; i++)
+                pattern[i] = key[i % key.Length];
 
-            int keyLen = key.Length;
-
-            // Rozwijamy klucz do długości = NWW(keyLen, Vector<byte>.Count) – jeden raz na wywołanie,
-            // żeby móc przetwarzać pełne wektory SIMD bez modulo w pętli.
-            int vecSize   = System.Numerics.Vector<byte>.Count; // 16 lub 32 zależnie od CPU
-            int expandLen = keyLen * vecSize;                   // NWW gdy vecSize jest potęgą 2
-
-            // Reu\u017cywamy bufor per-wątek — alokacja tylko przy pierwszym wywołaniu lub gdy klucz jest dłuższy
-            if (_expandedBuf == null || _expandedBuf.Length < expandLen)
-                _expandedBuf = new byte[expandLen];
-            byte[] expanded = _expandedBuf;
-            for (int i = 0; i < expandLen; i++)
-                expanded[i] = key[i % keyLen];
-
-            var keyVec = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, System.Numerics.Vector<byte>>(expanded);
+            var patternVectors = MemoryMarshal.Cast<byte, Vector<byte>>(pattern);
 
             int pos = 0;
-            int vecBlock = vecSize;
-
-            // Pętla SIMD – przetwarza vecSize bajtów naraz
-            int keyVecIdx = 0;
-            while (pos + vecBlock <= data.Length)
+            for (; pos + patternLength <= data.Length; pos += patternLength)
             {
-                var dataSlice = System.Runtime.InteropServices.MemoryMarshal
-                    .Cast<byte, System.Numerics.Vector<byte>>(data.Slice(pos, vecBlock));
-                dataSlice[0] ^= keyVec[keyVecIdx % keyVec.Length];
-                pos       += vecBlock;
-                keyVecIdx++;
+                var dataVectors = MemoryMarshal.Cast<byte, Vector<byte>>(data.Slice(pos, patternLength));
+                for (int v = 0; v < dataVectors.Length; v++)
+                    dataVectors[v] ^= patternVectors[v];
             }
 
-            // Ogon – bajty których nie starczyło na pełny wektor, bez modulo
-            // Pozycja w kluczu na podstawie pos (już obliczonego)
-            int keyPos = pos % keyLen;
-            while (pos < data.Length)
-            {
-                data[pos] ^= key[keyPos];
-                pos++;
-                keyPos++;
-                if (keyPos == keyLen) keyPos = 0;
-            }
-        }
-
-        public enum SecurityLevel
-        {
-            Fast = 1,
-            Optimal = 2,
-            Best = 3,
+            // Ogon krótszy niż jeden wzorzec
+            for (int i = 0; pos < data.Length; pos++, i++)
+                data[pos] ^= pattern[i];
         }
     }
 }

@@ -1,100 +1,81 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Security.Cryptography;
+﻿using System.Buffers.Binary;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace AdvancedDNV
 {
+    /// <summary>
+    /// Ramka DNV do przesyłania przez sieć (bez pliku, hasła i kompresji).
+    /// Układ bajtów: [2B wersja][4B długość metadanych][metadane][main], całość zaciemniona XOR.
+    /// </summary>
     public class DNVFrame
     {
-        private DNVProperties _myProperties = DNVProperties.Instance;
+        private const int HeaderLength = 2 + 4;
 
-        private Container _conMain;
-        private Container _metadata;
+        private readonly Container _conMain;
+        private readonly Container _metadata;
 
-        public DNVFrame() 
+        public DNVFrame()
         {
-            _conMain = new Container("Main", null);
+            _conMain  = new Container("Main", null);
             _metadata = new Container("MetaData", null);
         }
 
+        /// <summary>
+        /// Odtwarza ramkę z bajtów. UWAGA: tablica jest odszyfrowywana w miejscu, a wartości ramki wskazują wprost na jej
+        /// fragmenty (bez kopiowania) — po przekazaniu jej tutaj NIE WOLNO jej zmieniać ani używać ponownie
+        /// (np. zwracać do ArrayPool). Bufory z WatsonTcp i z odszyfrowania są za każdym razem nowe, więc to spełniają.
+        /// </summary>
+        /// <exception cref="FormatException">Ramka jest uszkodzona lub ucięta</exception>
         public DNVFrame(byte[] recoveryData)
         {
-            DNVEncryption.SimpleEncryptInPlace(recoveryData, _myProperties.DNVFrameEncryption);
-            InitializeFrame(recoveryData);
+            DNVEncryption.SimpleEncryptInPlace(recoveryData, DNVProperties.DNVFrameEncryption);
+
+            // Walidacja nagłówka (2026-08-14): uszkodzona/ucięta ramka dawała wcześniej OverflowException albo
+            // ArgumentException, a że odbiorcy parsują ramki w handlerach async void, niezłapany wyjątek zabijał CAŁY
+            // proces. Teraz każda niespójność to FormatException, który warstwa odbiorcza łapie i loguje.
+            if (recoveryData.Length < HeaderLength + 4 + 4)
+                throw new FormatException($"Ramka DNV za krótka: {recoveryData.Length}B (minimum {HeaderLength + 8}B).");
+
+            ushort version  = BinaryPrimitives.ReadUInt16LittleEndian(recoveryData);
+            int    metaLength = BinaryPrimitives.ReadInt32LittleEndian(recoveryData.AsSpan(2));
+            long   mainLength = (long)recoveryData.Length - HeaderLength - metaLength;
+            if (metaLength < 4 || mainLength < 4)
+                throw new FormatException($"Nagłówek ramki DNV niespójny: len={recoveryData.Length}, wersja={version}, metaDataCount={metaLength}, mainCount={mainLength} - ramka uszkodzona lub niekompletna.");
+
+            _metadata = Container.Parse(recoveryData, HeaderLength, metaLength, "MetaData");
+            _conMain  = Container.Parse(recoveryData, HeaderLength + metaLength, (int)mainLength, "Main");
         }
 
-        public DNVFrame(string recoveryDataString)
-        {
-            byte[] recoveryData = Encoding.UTF8.GetBytes(recoveryDataString);
-            DNVEncryption.SimpleEncryptInPlace(recoveryData, _myProperties.DNVFrameEncryption);
-            InitializeFrame(recoveryData);
-        }
-
-        private void InitializeFrame(byte[] initializeData)
-        {
-            int lastIndex = 0;
-            int version = BitConverter.ToInt32(initializeData, lastIndex); lastIndex += 2;
-            int metaDataCount = BitConverter.ToInt32(initializeData, lastIndex); lastIndex += 4;
-
-            // Tworzymy nową tablicę na wynik
-            byte[] metadataData = new byte[metaDataCount];
-            byte[] mainData = new byte[initializeData.Length - lastIndex - metaDataCount];
-
-            // Kopiujemy część tablicy
-            Buffer.BlockCopy(initializeData, lastIndex, metadataData, 0, metaDataCount);
-            Buffer.BlockCopy(initializeData, lastIndex + metaDataCount, mainData, 0, mainData.Length);
-
-            int metaStart = 4;
-            int mainStart = 4;
-            _metadata = new Container(metadataData, null, ref metaStart, BitConverter.ToInt32(metadataData, 0));
-            _conMain  = new Container(mainData,     null, ref mainStart, BitConverter.ToInt32(mainData, 0));
-        }
+        public DNVFrame(string recoveryDataString) : this(Encoding.UTF8.GetBytes(recoveryDataString)) { }
 
         public byte[] SendToByte()
         {
-            //SET METADATA
-            _metadata.Value("Frame").Set(true);
+            _metadata.Value("Frame").Set(true); // metadane nie mogą być puste
 
-            //COMPILE
-            var byteMain     = _conMain.CompileContainer();
-            var byteMetadata = _metadata.CompileContainer();
+            byte[] metadata = _metadata.CompileContainer(); // kilkanaście bajtów
+            byte[] result;
 
-            long totalLen = 2L + 4 + byteMetadata.Length + byteMain.Length;
-            if (totalLen + 4096 >= int.MaxValue)
-                throw new Exception("DNV is too long");
+            lock (_conMain.SyncRoot) // main zapisujemy wprost do ramki wynikowej — bez pośrednich kopii danych
+            {
+                int  mainLength  = _conMain.CompiledSize(out int indexSize);
+                long totalLength = HeaderLength + (long)metadata.Length + mainLength;
+                if (totalLength + 4096 >= int.MaxValue)
+                    throw new Exception("DNV is too long");
 
-            byte[] exportData = new byte[totalLen];
-            int offset = 0;
+                result = GC.AllocateUninitializedArray<byte>((int)totalLength); // każdy bajt zostaje zapisany poniżej
+                BinaryPrimitives.WriteUInt16LittleEndian(result, DNVProperties.MyVersion);
+                BinaryPrimitives.WriteInt32LittleEndian(result.AsSpan(2), metadata.Length);
+                metadata.CopyTo(result, HeaderLength);
+                _conMain.CompileInto(result.AsSpan(HeaderLength + metadata.Length), indexSize);
+            }
 
-            exportData[offset++] = _myProperties.MyVersion;
-            exportData[offset++] = 0x00;
-
-            // Inline zapis 4 bajtów — eliminuje BitConverter.GetBytes + alokację byte[4]
-            exportData[offset]     = (byte)byteMetadata.Length;
-            exportData[offset + 1] = (byte)(byteMetadata.Length >> 8);
-            exportData[offset + 2] = (byte)(byteMetadata.Length >> 16);
-            exportData[offset + 3] = (byte)(byteMetadata.Length >> 24);
-            offset += 4;
-
-            Buffer.BlockCopy(byteMetadata, 0, exportData, offset, byteMetadata.Length); offset += byteMetadata.Length;
-            Buffer.BlockCopy(byteMain,     0, exportData, offset, byteMain.Length);
-
-            DNVEncryption.SimpleEncryptInPlace(exportData, _myProperties.DNVFrameEncryption);
-            return exportData;
+            DNVEncryption.SimpleEncryptInPlace(result, DNVProperties.DNVFrameEncryption);
+            return result;
         }
 
-        
-        public string SendToString()
-        {
-            return Encoding.UTF8.GetString(SendToByte());
-        }
+        public string SendToString() => Encoding.UTF8.GetString(SendToByte());
 
-        /// <summary>
-        /// The default container that maintains the structure
-        /// </summary>
-        public Container main {  get { return _conMain; } }
+        /// <summary> Główny kontener z danymi ramki </summary>
+        public Container main => _conMain;
     }
 }
